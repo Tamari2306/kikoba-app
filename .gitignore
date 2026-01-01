@@ -1,0 +1,8 @@
+backend/kikoba.db
+.env
+__pycache__/
+*.pyc
+instance/
+venv/
+.env.*
+
