@@ -1,8 +1,16 @@
-backend/kikoba.db
 .env
+.env.*
 __pycache__/
 *.pyc
-instance/
 venv/
-.env.*
+.venv/
 
+# Databases
+*.db
+
+# Uploads & generated files
+backend/uploads/
+
+# OS files
+.DS_Store
+Thumbs.db
