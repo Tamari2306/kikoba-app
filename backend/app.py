@@ -1981,6 +1981,14 @@ def download_report_pdf():
     title = Paragraph(f"📊 {group_name} - Monthly Financial Report", styles['Title'])
     elements.append(title)
     elements.append(Spacer(1, 12))
+    report_date = datetime.now().strftime("%B %Y")
+    subtitle = Paragraph(
+    f"<i>Report Period: {report_date}</i>",
+    styles['Normal']
+    )
+    elements.append(subtitle)
+    elements.append(Spacer(1, 10))
+
 
     response = get_report_data() 
     report_json = response.get_json()
@@ -1988,12 +1996,12 @@ def download_report_pdf():
 
     total_contributions = sum(m['total_contributions'] for m in report_data)
     total_loans_due = sum(m['remaining_loans'] for m in report_data)
-    total_profit_share = sum(m['expected_profit_share'] for m in report_data)
+    #total_profit_share = sum(m['expected_profit_share'] for m in report_data)
 
     summary_data = [
         [Paragraph("<b>Total Contributions</b>", styles['Normal']), f"{total_contributions:,.0f} TZS"],
         [Paragraph("<b>Total Loans Outstanding</b>", styles['Normal']), f"{total_loans_due:,.0f} TZS"],
-        [Paragraph("<b>Distributable Profit</b>", styles['Normal']), f"{total_profit_share:,.0f} TZS"]
+        #[Paragraph("<b>Distributable Profit</b>", styles['Normal']), f"{total_profit_share:,.0f} TZS"]
     ]
     summary_table = Table(summary_data, colWidths=[150, 100])
     summary_table.setStyle(TableStyle([
@@ -2005,8 +2013,7 @@ def download_report_pdf():
 
     headers = [
         "Member", "Units", "Hisa Anzia", "Hisa", "Jamii", "Total Contrib",
-        "Loans Taken", "Rejesho", "Loan Due", "Penalties", "Profits Share", "Net Payout"
-    ]
+        "Loans Taken", "Rejesho", "Loan Due", "Penalties"] #"Profits Share", "Net Payout"]
     data = [headers]
 
     for m in report_data:
@@ -2021,8 +2028,8 @@ def download_report_pdf():
             f"{m['total_rejesho']:,.0f}",
             f"{m['remaining_loans']:,.0f}",
             f"{m['total_penalties']:,.0f}",
-            f"{m['expected_profit_share']:,.0f}",
-            f"{m['net_payout']:,.0f}"
+            #f"{m['expected_profit_share']:,.0f}",
+            #f"{m['net_payout']:,.0f}"
         ])
 
     table = Table(data, repeatRows=1)
@@ -2034,6 +2041,15 @@ def download_report_pdf():
         ('GRID', (0,0), (-1,-1), 0.3, colors.grey),
     ]))
     elements.append(table)
+
+    generated_on = datetime.now().strftime("%d %b %Y")
+    generated_text = Paragraph(
+    f"<font size=8>Generated on: {generated_on}</font>",
+    styles['Normal']
+)
+    elements.append(Spacer(1, 6))
+    elements.append(generated_text)
+
 
     doc.build(elements)
     buffer.seek(0)
