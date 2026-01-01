@@ -1,0 +1,767 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+    <h2 id="group-name-header" class="fw-bold text-success border-bottom pb-1">
+        {{ group.name }} Dashboard
+    </h2>
+    <small class="text-muted">
+        Welcome, {{ admin.name }} (Group Admin)
+    </small>
+</div>
+
+
+    <div class="d-flex gap-2">
+        <button class="btn btn-success btn-lg rounded-pill shadow-sm d-flex align-items-center gap-2" 
+                data-bs-toggle="modal" data-bs-target="#configModal"
+                style="transition: transform 0.2s, box-shadow 0.2s;">
+            <i class="bi bi-gear-fill"></i> Settings
+        </button>
+
+        <button id="downloadBackupBtn" class="btn btn-warning btn-lg rounded-pill shadow-sm d-flex align-items-center gap-2"
+            style="transition: transform 0.2s, box-shadow 0.2s;">
+            <i class="bi bi-cloud-arrow-down-fill"></i> Download Backup
+        </button>
+    </div>
+</div>
+
+
+<div class="modal fade" id="configModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">⚙️ Group Settings</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+
+      <div class="modal-body">
+        <form id="settingsForm">
+          <!-- Basic Settings -->
+          <h6 class="fw-bold text-primary mb-3">📋 Basic Information</h6>
+          <div class="row g-3 mb-4">
+            <div class="col-md-6">
+              <label class="form-label">Group Name</label>
+              <input type="text" class="form-control" name="group_name" id="group_name">
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label">Interest Rate (%)</label>
+              <input type="number" class="form-control" name="interest_rate" id="interest_rate" step="0.01">
+              <small class="text-muted">e.g., 10 for 10%</small>
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label">Daily Penalty Amount (TZS)</label>
+              <input type="number" class="form-control" name="daily_penalty_amount" id="daily_penalty_amount">
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label">Leadership Pay (TZS)</label>
+              <input type="number" class="form-control" name="leadership_pay_amount" id="leadership_pay_amount">
+              <small class="text-muted">One-time compensation from profits</small>
+            </div>
+          </div>
+
+          <hr>
+
+          <!-- Cycle Duration -->
+          <h6 class="fw-bold text-success mb-3">📅 Cycle Duration</h6>
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label">Cycle Start Date</label>
+              <input type="date" class="form-control" name="cycle_start_date" id="cycle_start_date" required>
+              <small class="text-muted">When does this kikoba cycle begin?</small>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Cycle End Date</label>
+              <input type="date" class="form-control" name="cycle_end_date" id="cycle_end_date" required>
+              <small class="text-muted">When does this kikoba cycle end?</small>
+            </div>
+          </div>
+          
+          <div class="alert alert-info mb-4" id="cycle_duration_display">
+            <strong>Cycle Duration:</strong> <span id="duration_text">Please set start and end dates</span>
+          </div>
+
+          <hr>
+
+          <!-- Jamii Configuration -->
+          <h6 class="fw-bold text-primary mb-3">💰 Jamii (Social Fund) Configuration</h6>
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label">Jamii Contribution Amount (TZS)</label>
+              <input type="number" class="form-control" name="jamii_amount" id="jamii_amount" min="0" step="1000" required>
+              <small class="text-muted">Amount each member contributes per period</small>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Contribution Frequency</label>
+              <select class="form-control" name="jamii_frequency" id="jamii_frequency" required>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="one-time">One-time (entire cycle)</option>
+              </select>
+              <small class="text-muted">How often members contribute</small>
+            </div>
+          </div>
+
+          <div class="alert alert-success mb-4" id="jamii_calculation_display">
+            <h6 class="mb-2">📊 Expected Jamii Contribution Per Member:</h6>
+            <p class="mb-0"><strong><span id="expected_jamii_per_member">0</span> TZS</strong> over the entire cycle</p>
+            <small class="text-muted">Based on <span id="periods_count">0</span> <span id="period_type">periods</span></small>
+          </div>
+
+          <hr>
+
+          <!-- HISA Unit System -->
+          <h6 class="fw-bold text-info mb-3">💎 HISA Unit System</h6>
+          <div class="row g-3 mb-3">
+              <div class="col-md-12">
+                  <label class="form-label">HISA Unit Price (TZS)</label>
+                  <input type="number" class="form-control" name="hisa_unit_price" id="hisa_unit_price" 
+                         min="1000" step="1000" required>
+                  <small class="text-muted">
+                      Fixed price per HISA unit (e.g., 5,000 TZS). Members buy units instead of contributing random amounts.
+                  </small>
+              </div>
+          </div>
+          
+          <div class="alert alert-info mb-4">
+              <strong>📊 How HISA Units Work:</strong><br>
+              • Members contribute in multiples of the unit price<br>
+              • Example: Unit price = 5,000 TZS → Member contributes 50,000 TZS = <strong>10 units</strong><br>
+              • Profit distribution: Each unit gets equal share of profits<br>
+              • <strong>Zero rounding errors!</strong> Total distributed always equals exact profit
+          </div>
+
+          <hr>
+
+          <!-- Loan Rules -->
+          <h6 class="fw-bold text-warning mb-3">🏦 Loan Rules</h6>
+          <div class="row g-3 mb-4">
+            <div class="col-md-6">
+                <label class="form-label">Tier 1: Max Amount (TZS)</label>
+                <input type="number" class="form-control" name="loan_tier1_amount" id="loan_tier1_amount">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Tier 1: Duration (Months)</label>
+                <input type="number" class="form-control" name="loan_tier1_months" id="loan_tier1_months">
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label">Tier 2: Max Amount (TZS)</label>
+                <input type="number" class="form-control" name="loan_tier2_amount" id="loan_tier2_amount">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Tier 2: Duration (Months)</label>
+                <input type="number" class="form-control" name="loan_tier2_months" id="loan_tier2_months">
+            </div>
+
+            <div class="col-md-6">
+                <label class="form-label">Tier 3: Max Amount (TZS)</label>
+                <input type="number" class="form-control" name="loan_tier3_amount" id="loan_tier3_amount">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Tier 3: Duration (Months)</label>
+                <input type="number" class="form-control" name="loan_tier3_months" id="loan_tier3_months">
+            </div>
+            
+            <div class="col-md-6">
+                <label class="form-label">Tier 4: Max Amount (TZS)</label>
+                <input type="number" class="form-control" name="loan_tier4_amount" id="loan_tier4_amount">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Tier 4: Duration (Months)</label>
+                <input type="number" class="form-control" name="loan_tier4_months" id="loan_tier4_months">
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-success btn-lg w-100">
+            <i class="bi bi-save"></i> Save All Settings
+          </button>
+        </form>
+
+        <hr>
+
+        <form id="constitutionForm" enctype="multipart/form-data">
+          <h6 class="fw-bold mb-3">📄 Upload Constitution (PDF)</h6>
+          <input type="file" class="form-control mb-3" name="constitution_file" accept=".pdf" required>
+          <button type="submit" class="btn btn-outline-primary w-100">
+            <i class="bi bi-upload"></i> Upload Constitution
+          </button>
+        </form>
+
+        <hr>
+
+        <h6 class="fw-bold">📑 Group Constitution</h6>
+
+        <div id="constitution-section" class="mt-2 d-none">
+            <p class="mb-1">
+                <i class="bi bi-file-earmark-pdf text-danger"></i>
+                <strong>Constitution uploaded</strong>
+            </p>
+            <a id="view-constitution" class="btn btn-sm btn-outline-primary me-2" target="_blank">
+                <i class="bi bi-eye"></i> View
+            </a>
+            <a id="download-constitution" class="btn btn-sm btn-outline-secondary">
+                <i class="bi bi-download"></i> Download
+            </a>
+        </div>
+
+        <div id="no-constitution" class="text-muted small">
+            No constitution uploaded yet.
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+
+    <div class="col-lg-4 col-md-6">
+        <div class="card shadow-sm h-100 border-success">
+            <div class="card-body">
+                <h6 class="text-muted">Net Profit Available</h6>
+                <h3 id="net-profit-in-hand" class="fw-bold text-success">0 TZS</h3>
+                <small class="text-muted">For distribution (Interest + Penalties - Expenses)</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4 col-md-6">
+        <div class="card shadow-sm h-100 border-primary">
+            <div class="card-body">
+                <h6 class="text-muted">Total Contributions (Hisa)</h6>
+                <h3 id="total-contributions-hisa" class="fw-bold text-primary">0 TZS</h3>
+                <small class="text-muted">Money contributed by members</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4 col-md-12">
+        <div class="card shadow-sm h-100 border-danger">
+            <div class="card-body">
+                <h6 class="text-muted">Outstanding Loan Balance</h6>
+                <h3 id="loan-balance-due" class="fw-bold text-danger">0 TZS</h3>
+                <small class="text-muted">Loans yet to be repaid</small>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<div class="row g-3 mb-4">
+
+    <div class="col-lg-3 col-md-6">
+        <div class="card shadow-sm h-100 border-info">
+            <div class="card-body">
+                <h6 class="text-muted">Total HISA Units</h6>
+                <h4 id="total-hisa-units" class="fw-bold text-info">0</h4>
+                <small class="text-muted">Active investment units</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-3 col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-muted">Principal Loaned</h6>
+                <h4 id="total-principal-loaned" class="fw-bold">0 TZS</h4>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-3 col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-muted">Interest Earned</h6>
+                <h4 id="total-interests" class="fw-bold text-success">0 TZS</h4>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-3 col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-muted">Penalties Imposed</h6>
+                <h4 id="penalties-imposed" class="fw-bold text-warning">0 TZS</h4>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<div class="row g-3 mb-4">
+
+    <div class="col-lg-4 col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-muted">Jamii Fund Expected</h6>
+                <h4 id="total-jamii-expected" class="fw-bold text-primary">0 TZS</h4>
+                <div class="small text-muted">Total mandatory fees due (Liability)</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4 col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-muted">Jamii Fund Used (Expenses)</h6>
+                <h4 id="jamii-fund-used" class="fw-bold text-danger">0 TZS</h4>
+                <div class="small text-muted">Unused Balance: <span id="unused-jamii-for-refund" class="fw-bold">0 TZS</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4 col-md-6">
+        <div class="card shadow-sm h-100 border-warning">
+            <div class="card-body">
+                <h6 class="text-muted">Jamii Contribution Shortfall</h6>
+                <h3 id="jamii-shortfall" class="fw-bold text-warning">0 TZS</h3>
+                <div class="small text-muted">Amount members owe for Jamii</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4 col-md-6">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-muted">Leadership Pay</h6>
+                <h4 id="leadership-pay-amount-display" class="fw-bold text-danger">0 TZS</h4>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-4 col-md-12">
+        <div class="card shadow-sm h-100">
+            <div class="card-body">
+                <h6 class="text-muted">Total Members</h6>
+                <h4 id="total-members" class="fw-bold">0</h4>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-6">
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <h6 class="mb-3">Money Distribution Overview</h6>
+                <canvas id="financeChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-6">
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <h6 class="mb-3">Loans Breakdown</h6>
+                <canvas id="loansChart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+/* ================= UTIL ================= */
+function formatTZS(v) {
+    return Number(v || 0).toLocaleString() + " TZS";
+}
+
+function formatDateForExcel(isoDateStr) {
+    const d = new Date(isoDateStr);
+    if (isNaN(d)) return "";
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+}
+
+/* ================= CYCLE CALCULATIONS ================= */
+function updateCycleDuration() {
+    const start = document.getElementById('cycle_start_date').value;
+    const end = document.getElementById('cycle_end_date').value;
+    
+    if (start && end) {
+        const startDate = new Date(start);
+        const endDate = new Date(end);
+        const diffTime = Math.abs(endDate - startDate);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        const diffWeeks = Math.floor(diffDays / 7);
+        const diffMonths = Math.floor(diffDays / 30);
+        
+        document.getElementById('duration_text').textContent = 
+            `${diffDays} days (≈${diffWeeks} weeks or ≈${diffMonths} months)`;
+        
+        updateJamiiCalculation();
+    }
+}
+
+function updateJamiiCalculation() {
+    const start = document.getElementById('cycle_start_date').value;
+    const end = document.getElementById('cycle_end_date').value;
+    const amount = parseFloat(document.getElementById('jamii_amount').value) || 0;
+    const frequency = document.getElementById('jamii_frequency').value;
+    
+    if (!start || !end || amount === 0) {
+        document.getElementById('expected_jamii_per_member').textContent = '0';
+        document.getElementById('periods_count').textContent = '0';
+        return;
+    }
+    
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    const diffTime = Math.abs(endDate - startDate);
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    
+    let periods, periodType;
+    
+    if (frequency === 'weekly') {
+        periods = Math.floor(diffDays / 7);
+        periodType = 'weeks';
+    } else if (frequency === 'monthly') {
+        periods = Math.floor(diffDays / 30);
+        periodType = 'months';
+    } else { // one-time
+        periods = 1;
+        periodType = 'payment';
+    }
+    
+    const expectedTotal = amount * periods;
+    
+    document.getElementById('expected_jamii_per_member').textContent = 
+        expectedTotal.toLocaleString();
+    document.getElementById('periods_count').textContent = periods;
+    document.getElementById('period_type').textContent = periodType;
+}
+
+/* ================= DASHBOARD DATA LOADING ================= */
+async function loadDashboard() {
+    try {
+        const res = await fetch("/api/dashboard");
+        const d = await res.json();
+
+        document.getElementById("group-name-header").innerText = d.group_name + " Dashboard";
+
+        // ================= SUMMARY CARDS =================
+        document.getElementById("net-profit-in-hand").innerText = formatTZS(d.net_profit_in_hand);
+        document.getElementById("total-contributions-hisa").innerText = formatTZS(d.total_contributions_hisa);
+        document.getElementById("loan-balance-due").innerText = formatTZS(d.loan_balance_due);
+
+        // ================= HISA UNITS =================
+        document.getElementById("total-hisa-units").innerText = 
+            (d.total_hisa_units || 0).toFixed(2) + " units";
+
+        // ================= FINANCIAL METRICS =================
+        document.getElementById("total-principal-loaned").innerText = formatTZS(d.total_principal_loaned);
+        document.getElementById("total-interests").innerText = formatTZS(d.total_interests);
+        
+        document.getElementById("penalties-imposed").innerText = formatTZS(d.penalties_imposed);
+
+        document.getElementById("leadership-pay-amount-display").innerText = formatTZS(d.leadership_pay_amount);
+        document.getElementById("total-members").innerText = d.total_members;
+
+        // ================= JAMII DISPLAY =================
+        const expected = d.expected_jamii_total || 0; 
+        const used = d.jamii_fund_used || 0;
+        const unused = d.unused_jamii_for_refund || 0; 
+        const shortfall = d.total_jamii_shortfall || 0;
+
+        document.getElementById("total-jamii-expected").innerText = formatTZS(expected);
+        document.getElementById("jamii-fund-used").innerText = formatTZS(used);
+        document.getElementById("unused-jamii-for-refund").innerText = formatTZS(unused);
+        document.getElementById("jamii-shortfall").innerText = formatTZS(shortfall);
+
+        loadCurrentSettings(d);
+        drawCharts(d);
+    } catch (e) {
+        console.error("Dashboard load failed", e);
+    }
+}
+
+/* ================= LOAD CURRENT SETTINGS INTO FORM ================= */
+function loadCurrentSettings(d) {
+    document.getElementById("group_name").value = d.group_name || '';
+    document.getElementById("interest_rate").value = parseFloat(d.interest_rate) * 100 || 0; 
+    
+    // Cycle dates
+    document.getElementById("cycle_start_date").value = d.cycle_start_date || '';
+    document.getElementById("cycle_end_date").value = d.cycle_end_date || '';
+    
+    // Jamii settings
+    document.getElementById("jamii_amount").value = d.jamii_amount || 2000;
+    document.getElementById("jamii_frequency").value = d.jamii_frequency || 'monthly';
+    
+    // HISA unit price
+    document.getElementById("hisa_unit_price").value = d.hisa_unit_price || 5000;
+    
+    document.getElementById("daily_penalty_amount").value = d.daily_penalty || 0;
+    document.getElementById("leadership_pay_amount").value = d.leadership_pay_amount || 0;
+
+    // Loan tiers
+    document.getElementById("loan_tier1_amount").value = d.loan_tier1_amount || 500000;
+    document.getElementById("loan_tier1_months").value = d.loan_tier1_months || 1;
+    document.getElementById("loan_tier2_amount").value = d.loan_tier2_amount || 1000000;
+    document.getElementById("loan_tier2_months").value = d.loan_tier2_months || 3;
+    document.getElementById("loan_tier3_amount").value = d.loan_tier3_amount || 2000000;
+    document.getElementById("loan_tier3_months").value = d.loan_tier3_months || 6;
+    document.getElementById("loan_tier4_amount").value = d.loan_tier4_amount || 5000000;
+    document.getElementById("loan_tier4_months").value = d.loan_tier4_months || 9;
+
+    // Trigger cycle calculations
+    updateCycleDuration();
+}
+
+/* ================= SETTINGS FORM ================= */
+function initSettingsForm() {
+    const form = document.getElementById("settingsForm");
+    if (!form) return;
+
+    // Add event listeners for live calculations
+    document.getElementById('cycle_start_date').addEventListener('change', updateCycleDuration);
+    document.getElementById('cycle_end_date').addEventListener('change', updateCycleDuration);
+    document.getElementById('jamii_amount').addEventListener('input', updateJamiiCalculation);
+    document.getElementById('jamii_frequency').addEventListener('change', updateJamiiCalculation);
+
+    form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+
+        const formData = new FormData(form);
+        const payload = Object.fromEntries(formData.entries());
+
+        // Validate cycle dates
+        if (payload.cycle_start_date && payload.cycle_end_date) {
+            if (new Date(payload.cycle_start_date) >= new Date(payload.cycle_end_date)) {
+                alert('End date must be after start date!');
+                return;
+            }
+        }
+
+        // Validate HISA unit price
+        if (payload.hisa_unit_price) {
+            const unitPrice = parseFloat(payload.hisa_unit_price);
+            if (unitPrice < 1000) {
+                alert('HISA unit price must be at least 1,000 TZS');
+                return;
+            }
+        }
+
+        if (payload.interest_rate) {
+            payload.interest_rate = (parseFloat(payload.interest_rate) / 100).toString();
+        }
+
+        try {
+            const res = await fetch("/api/settings", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                alert(data.message || "Settings saved successfully!");
+                const modal = bootstrap.Modal.getInstance(document.getElementById('configModal'));
+                if (modal) modal.hide();
+                loadDashboard();
+            } else {
+                alert(data.error || "Failed to save settings");
+            }
+        } catch (error) {
+            console.error("Error saving settings:", error);
+            alert("Failed to save settings. Please try again.");
+        }
+    });
+}
+
+/* ================= CONSTITUTION FORM ================= */
+function initConstitutionForm() {
+    const form = document.getElementById("constitutionForm");
+    if (!form) return;
+
+    form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        try {
+            const res = await fetch("/api/constitution/upload", {
+                method: "POST",
+                body: new FormData(form)
+            });
+            const data = await res.json();
+            if (res.ok) {
+                alert(data.message || "Constitution uploaded successfully!");
+                form.reset();
+                loadConstitutionStatus();
+            } else {
+                alert(data.error || "Failed to upload constitution");
+            }
+        } catch (error) {
+            console.error("Error uploading constitution:", error);
+            alert("Failed to upload constitution. Please try again.");
+        }
+    });
+}
+
+async function loadConstitutionStatus() {
+    try {
+        const res = await fetch("/api/constitution/status");
+        const d = await res.json();
+
+        const section = document.getElementById("constitution-section");
+        const empty = document.getElementById("no-constitution");
+
+        if (d.uploaded) {
+            section.classList.remove("d-none");
+            empty.classList.add("d-none");
+
+            document.getElementById("view-constitution").href = d.view_url;
+            document.getElementById("download-constitution").href = d.download_url;
+        } else {
+            section.classList.add("d-none");
+            empty.classList.remove("d-none");
+        }
+    } catch (e) {
+        console.warn("No constitution yet");
+    }
+}
+
+
+/* ================= CHARTS ================= */
+function drawCharts(d) {
+    const financeChartCanvas = document.getElementById("financeChart");
+    const loansChartCanvas = document.getElementById("loansChart");
+
+    if (financeChartCanvas.chart) financeChartCanvas.chart.destroy();
+    if (loansChartCanvas.chart) loansChartCanvas.chart.destroy();
+
+    financeChartCanvas.chart = new Chart(financeChartCanvas, {
+        type: "bar",
+        data: {
+            labels: ["Contributions", "Loans", "Interest", "Net Profit"],
+            datasets: [{
+                label: "Amount (TZS)",
+                data: [
+                    d.total_contributions_hisa,
+                    d.total_principal_loaned,
+                    d.total_interests,
+                    d.net_profit_in_hand
+                ],
+                backgroundColor: [
+                    'rgba(54, 162, 235, 0.5)',
+                    'rgba(255, 159, 64, 0.5)',
+                    'rgba(75, 192, 192, 0.5)',
+                    'rgba(153, 102, 255, 0.5)'
+                ],
+                borderColor: [
+                    'rgb(54, 162, 235)',
+                    'rgb(255, 159, 64)',
+                    'rgb(75, 192, 192)',
+                    'rgb(153, 102, 255)'
+                ],
+                borderWidth: 1
+            }]
+        },
+        options: { responsive: true, maintainAspectRatio: true }
+    });
+
+    loansChartCanvas.chart = new Chart(loansChartCanvas, {
+        type: "doughnut",
+        data: {
+            labels: ["Loans Repaid", "Loans Outstanding"],
+            datasets: [{
+                data: [
+                    Math.max(d.total_principal_loaned - d.loan_balance_due, 0),
+                    d.loan_balance_due
+                ],
+                backgroundColor: [
+                    'rgba(54, 162, 235, 0.5)',
+                    'rgba(255, 159, 64, 0.5)',
+                    'rgba(75, 192, 192, 0.5)',
+                    'rgba(153, 102, 255, 0.5)'
+                ],
+                borderColor: [
+                    'rgb(54, 162, 235)',
+                    'rgb(255, 159, 64)',
+                    'rgb(75, 192, 192)',
+                    'rgb(153, 102, 255)'
+                ],
+                borderWidth: 1
+            }]
+        },
+        options: { responsive: true, maintainAspectRatio: true }
+    });
+
+    loansChartCanvas.chart = new Chart(loansChartCanvas, {
+        type: "doughnut",
+        data: {
+            labels: ["Loans Repaid", "Loans Outstanding"],
+            datasets: [{
+                data: [
+                    Math.max(d.total_principal_loaned - d.loan_balance_due, 0),
+                    d.loan_balance_due
+                ],
+                backgroundColor: [
+                    'rgba(75, 192, 192, 0.5)',
+                    'rgba(255, 99, 132, 0.5)'
+                ],
+                borderColor: ['rgb(75, 192, 192)', 'rgb(255, 99, 132)'],
+                borderWidth: 1
+            }]
+        },
+        options: { responsive: true, maintainAspectRatio: true }
+    });
+}
+
+/* ================= BACKUP SYSTEM ================= */
+function initBackupButton() {
+    const backupBtn = document.getElementById("downloadBackupBtn");
+    if (!backupBtn) return;
+
+    backupBtn.addEventListener("click", async () => {
+        const originalContent = backupBtn.innerHTML;
+        backupBtn.disabled = true;
+        backupBtn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Backing up...`;
+
+        try {
+            const response = await fetch("/api/backup/export");
+            
+            if (!response.ok) throw new Error("Backup failed");
+
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            
+            const contentDisposition = response.headers.get('Content-Disposition');
+            let filename = `kikoba_backup_${new Date().toISOString().slice(0,10)}.zip`;
+            
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+
+        } catch (error) {
+            console.error("Backup Error:", error);
+            alert("Failed to generate backup. Please check server logs.");
+        } finally {
+            backupBtn.disabled = false;
+            backupBtn.innerHTML = originalContent;
+        }
+    });
+}
+
+/* ================= BOOT ================= */
+document.addEventListener("DOMContentLoaded", () => {
+    initSettingsForm();
+    initConstitutionForm();
+    initBackupButton();
+    loadConstitutionStatus();
+    loadDashboard();
+});
+</script>
+
+{% endblock %}

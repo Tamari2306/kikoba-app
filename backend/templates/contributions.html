@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h2>Contributions</h2>
+
+<div class="card p-3 mb-4 shadow-sm">
+  <form id="add-contribution-form" class="row g-3">
+    <div class="col-md-4">
+      <select id="member-id" class="form-select" required>
+        <option value="">Select Member</option>
+      </select>
+    </div>
+    <div class="col-md-3">
+      <select id="contribution-type" class="form-select" required>
+        <option value="">Select Type</option>
+        <option value="hisa anzia">Hisa Anzia</option>
+        <option value="hisa">Hisa</option>
+        <option value="jamii">Jamii</option>
+      </select>
+    </div>
+    <div class="col-md-3">
+      <input type="number" id="contribution-amount" class="form-control" placeholder="Amount" required>
+    </div>
+    <div class="col-md-2">
+      <button class="btn btn-primary w-100" type="submit"><i class="bi bi-plus-circle"></i> Add</button>
+    </div>
+  </form>
+</div>
+
+<!-- Edit Contribution Modal -->
+<div class="modal fade" id="editContributionModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-warning">
+                <h5 class="modal-title">Edit Contribution</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="edit-contribution-form">
+                    <input type="hidden" id="editContribId">
+                    <div class="mb-3">
+                        <label class="form-label">Member</label>
+                        <input type="text" class="form-control" id="editContribMember" disabled>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Type</label>
+                        <select id="editContribType" class="form-select" required>
+                            <option value="hisa anzia">Hisa Anzia</option>
+                            <option value="hisa">Hisa</option>
+                            <option value="jamii">Jamii</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Amount (TZS)</label>
+                        <input type="number" id="editContribAmount" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Date</label>
+                        <input type="date" id="editContribDate" class="form-control" required>
+                    </div>
+                    <button class="btn btn-warning w-100"><i class="bi bi-save"></i> Update</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow-sm p-3">
+<table class="table table-striped table-hover" id="contributions-table">
+  <thead class="table-success">
+    <tr>
+      <th>Date</th>
+      <th>Member</th>
+      <th>Type</th>
+      <th>Amount</th>
+      <th class="text-center">Actions</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+</div>
+
+<script>
+const API = "/api/contributions";
+
+async function loadMembersDropdown() {
+    const res = await fetch("/api/members");
+    const members = await res.json();
+    const select = document.getElementById("member-id");
+    select.innerHTML = '<option value="">Select Member</option>';
+    members.forEach(m => {
+        select.innerHTML += `<option value="${m.id}">${m.name}</option>`;
+    });
+}
+
+async function loadContributions() {
+    const res = await fetch(API);
+    const data = await res.json();
+    const tbody = document.querySelector("#contributions-table tbody");
+    tbody.innerHTML = "";
+    
+    data.forEach(c => {
+        const isSystemRecord = c.type === 'jamii_deduction';
+        const actionButtons = isSystemRecord 
+            ? `<span class="badge bg-secondary">System Record</span>`
+            : `
+                <button class="btn btn-sm btn-outline-warning edit-contrib-btn" 
+                        data-id="${c.id}"
+                        data-member="${c.member_name}"
+                        data-type="${c.type}"
+                        data-amount="${c.amount}"
+                        data-date="${c.date}">
+                    <i class="bi bi-pencil"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger delete-contrib-btn" 
+                        data-id="${c.id}"
+                        data-member="${c.member_name}">
+                    <i class="bi bi-trash"></i>
+                </button>
+            `;
+        
+        tbody.innerHTML += `<tr>
+            <td>${c.date}</td>
+            <td>${c.member_name}</td>
+            <td><span class="badge bg-info">${c.type}</span></td>
+            <td>${c.amount.toLocaleString()} TZS</td>
+            <td class="text-center">${actionButtons}</td>
+        </tr>`;
+    });
+
+    // Attach event listeners
+    document.querySelectorAll('.edit-contrib-btn').forEach(btn => {
+        btn.addEventListener('click', handleEditContrib);
+    });
+    document.querySelectorAll('.delete-contrib-btn').forEach(btn => {
+        btn.addEventListener('click', handleDeleteContrib);
+    });
+}
+
+function handleEditContrib(e) {
+    const btn = e.currentTarget;
+    document.getElementById('editContribId').value = btn.dataset.id;
+    document.getElementById('editContribMember').value = btn.dataset.member;
+    document.getElementById('editContribType').value = btn.dataset.type;
+    document.getElementById('editContribAmount').value = btn.dataset.amount;
+    document.getElementById('editContribDate').value = btn.dataset.date;
+
+    new bootstrap.Modal(document.getElementById('editContributionModal')).show();
+}
+
+async function handleDeleteContrib(e) {
+    const btn = e.currentTarget;
+    const id = btn.dataset.id;
+    const member = btn.dataset.member;
+
+    if (!confirm(`Delete contribution for ${member}?`)) return;
+
+    try {
+        const res = await fetch(`${API}/${id}`, { method: 'DELETE' });
+        const data = await res.json();
+
+        if (res.ok) {
+            alert(data.message || 'Contribution deleted');
+            loadContributions();
+        } else {
+            alert(data.error || 'Failed to delete');
+        }
+    } catch (error) {
+        alert('Network error');
+        console.error(error);
+    }
+}
+
+// Add contribution form
+document.getElementById("add-contribution-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const member_id = document.getElementById("member-id").value;
+    const type = document.getElementById("contribution-type").value;
+    const amount = parseInt(document.getElementById("contribution-amount").value);
+    
+    await fetch(API, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({member_id, type, amount})
+    });
+    
+    document.getElementById("contribution-amount").value = "";
+    loadContributions();
+});
+
+// Edit contribution form
+document.getElementById("edit-contribution-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const id = document.getElementById('editContribId').value;
+    const type = document.getElementById('editContribType').value;
+    const amount = parseFloat(document.getElementById('editContribAmount').value);
+    const date = document.getElementById('editContribDate').value;
+
+    try {
+        const res = await fetch(`${API}/${id}`, {
+            method: "PUT",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ type, amount, date })
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+            alert(data.message || 'Contribution updated');
+            bootstrap.Modal.getInstance(document.getElementById('editContributionModal')).hide();
+            loadContributions();
+        } else {
+            alert(data.error || 'Failed to update');
+        }
+    } catch (error) {
+        alert('Network error');
+        console.error(error);
+    }
+});
+
+loadMembersDropdown();
+loadContributions();
+</script>
+
+{% endblock %}

@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid py-4">
+    
+    <div id="loan-selection-area">
+        <h2 class="mb-4 text-danger">⚠️ Error: Loan Not Selected</h2>
+        <p class="lead">Please navigate to the **Loans** page and click the "Repay" button next to the specific loan you wish to view or update.</p>
+        <a href="/loans-page" class="btn btn-primary">Go to Loans Page</a>
+    </div>
+
+    <div id="repayment-content" style="display: none;">
+        <h2 class="mb-4">Loan Repayment History</h2>
+        <h5 id="loan-details-header"></h5>
+
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="card shadow-sm p-3 bg-light">
+                    <h6>Loan Summary</h6>
+                    <p class="mb-1"><strong>Principal:</strong> <span id="summary-principal"></span> TZS</p>
+                    <p class="mb-1"><strong>Total Due:</strong> <span id="summary-total"></span> TZS</p>
+                    <p class="mb-1"><strong>Amount Paid:</strong> <span id="summary-paid" class="text-success"></span> TZS</p>
+                    <p class="mb-1"><strong>Remaining Balance:</strong> <span id="summary-remaining" class="fw-bold text-danger"></span> TZS</p>
+                    <p class="mb-0"><strong>Due Date:</strong> <span id="summary-due-date"></span></p>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card shadow-sm p-3">
+                    <h6>Record New Repayment</h6>
+                    <div class="input-group mb-3">
+                        <input type="number" id="repayment-amount" class="form-control" placeholder="Enter Amount (TZS)" min="1" required>
+                        <button class="btn btn-success" id="record-repayment-btn">Record Payment</button>
+                    </div>
+                    <div id="repayment-status-message" class="mt-2"></div>
+                </div>
+            </div>
+        </div>
+
+        <h3>Repayment Transactions</h3>
+        <div class="card shadow-sm p-3">
+            <table class="table table-hover align-middle">
+                <thead class="table-info">
+                    <tr>
+                        <th>Date</th>
+                        <th>Amount Paid (TZS)</th>
+                    </tr>
+                </thead>
+                <tbody id="repayment-history-table">
+                    </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    const loanId = "{{ loan_id }}"; // This is how Flask passes the ID to the HTML
+
+    document.addEventListener('DOMContentLoaded', () => {
+        if (loanId && loanId !== 'None') {
+            document.getElementById('loan-selection-area').style.display = 'none';
+            document.getElementById('repayment-content').style.display = 'block';
+            loadRepaymentHistory(loanId);
+            document.getElementById('record-repayment-btn').addEventListener('click', handleRecordRepayment);
+        } else {
+            document.getElementById('loan-selection-area').style.display = 'block';
+            document.getElementById('repayment-content').style.display = 'none';
+        }
+    });
+
+    async function loadRepaymentHistory(id) {
+        const url = `/api/rejesho/${id}`;
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error('Failed to fetch loan data.');
+            }
+            const data = await response.json();
+            
+            updateLoanSummary(data.loan_info, data.repayments);
+            updateRepaymentTable(data.repayments);
+
+        } catch (error) {
+            console.error("Error loading repayment data:", error);
+            alert("Could not load loan details. Please check the console.");
+        }
+    }
+
+    function updateLoanSummary(loan, repayments) {
+        const totalPaid = repayments.reduce((sum, r) => sum + r.amount, 0);
+        const remaining = loan.total - totalPaid;
+
+        document.getElementById('loan-details-header').innerText = `Loan for ${loan.member_name} (ID: ${loan.id})`;
+        document.getElementById('summary-principal').innerText = loan.principal.toLocaleString();
+        document.getElementById('summary-total').innerText = loan.total.toLocaleString();
+        document.getElementById('summary-paid').innerText = totalPaid.toLocaleString();
+        document.getElementById('summary-remaining').innerText = remaining.toLocaleString();
+        document.getElementById('summary-due-date').innerText = loan.due_date;
+        
+        // Show status (optional)
+        const remainingElement = document.getElementById('summary-remaining');
+        if (remaining <= 0) {
+             remainingElement.classList.replace('text-danger', 'text-success');
+             remainingElement.innerHTML += ' (CLEARED)';
+             document.getElementById('record-repayment-btn').disabled = true;
+        } else {
+             document.getElementById('record-repayment-btn').disabled = false;
+        }
+    }
+
+    function updateRepaymentTable(repayments) {
+        const tbody = document.getElementById('repayment-history-table');
+        tbody.innerHTML = '';
+
+        if (repayments.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="2" class="text-center">No repayments recorded yet.</td></tr>';
+            return;
+        }
+
+        repayments.forEach(r => {
+            const row = `<tr>
+                <td>${r.date}</td>
+                <td>${r.amount.toLocaleString()}</td>
+            </tr>`;
+            tbody.innerHTML += row;
+        });
+    }
+
+    async function handleRecordRepayment() {
+        const amountInput = document.getElementById('repayment-amount');
+        const amount = parseFloat(amountInput.value);
+        const statusMessage = document.getElementById('repayment-status-message');
+
+        if (isNaN(amount) || amount <= 0) {
+            statusMessage.innerHTML = '<span class="text-danger">Please enter a valid amount.</span>';
+            return;
+        }
+
+        const res = await fetch("/api/rejesho", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ loan_id: loanId, amount: amount })
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+            statusMessage.innerHTML = `<span class="text-success">Payment of ${amount.toLocaleString()} TZS recorded successfully!</span>`;
+            amountInput.value = ''; // Clear input
+            loadRepaymentHistory(loanId); // Reload data to update table and summary
+        } else {
+            statusMessage.innerHTML = `<span class="text-danger">Error: ${data.error || 'Failed to record payment.'}</span>`;
+        }
+    }
+
+</script>
+{% endblock %}

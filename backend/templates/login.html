@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Admin Login</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light d-flex align-items-center justify-content-center vh-100">
+
+<div class="card shadow-lg rounded-4 p-4" style="max-width: 420px; width: 100%;">
+    <h3 class="text-center fw-bold text-success mb-3">Kikoba Admin Login</h3>
+
+    {% if error %}
+        <div class="alert alert-danger text-center">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST">
+        <div class="mb-3">
+            <label class="form-label fw-semibold">Admin Email</label>
+            <input type="email" name="email" class="form-control rounded-pill" required>
+        </div>
+
+        <div class="mb-3">
+            <label class="form-label fw-semibold">Password</label>
+            <input type="password" name="password" class="form-control rounded-pill" required>
+        </div>
+
+        <button class="btn btn-success w-100 rounded-pill fw-bold mt-2">
+            Login
+        </button>
+    </form>
+
+    <div class="text-center mt-3">
+        <small class="text-muted">
+            New group? <a href="/signup" class="text-success fw-semibold">Create admin account</a>
+        </small>
+    </div>
+</div>
+
+</body>
+</html>

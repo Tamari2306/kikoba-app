@@ -1,0 +1,304 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="container-fluid py-4">
+    <h2 class="mb-3 text-danger">🚨 Penalty Ledger Management</h2>
+
+    <div class="card shadow-sm mb-4 p-3 bg-light">
+        <h4 class="mb-0">Total Group Penalties Outstanding: <span id="total-penalty-due" class="text-danger">0 TZS</span></h4>
+    </div>
+
+    <div class="card shadow-sm mb-4 p-4">
+        <h5 class="mb-3 text-danger">Add Manual Penalty</h5>
+        <form id="add-penalty-form" class="row g-3 align-items-center">
+            <div class="col-md-4">
+                <select id="penalty-member-id" class="form-select" required>
+                    <option value="">Select Member</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <input type="number" id="penalty-amount" class="form-control" placeholder="Amount (TZS)" required min="1">
+            </div>
+            <div class="col-md-3">
+                <input type="text" id="penalty-desc" class="form-control" placeholder="Description (optional)">
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-danger w-100" type="submit">Add Penalty</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Edit Penalty Modal -->
+    <div class="modal fade" id="editPenaltyModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-warning">
+                    <h5 class="modal-title">Edit Penalty</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="edit-penalty-form">
+                        <input type="hidden" id="editPenaltyId">
+                        <div class="mb-3">
+                            <label class="form-label">Member</label>
+                            <input type="text" class="form-control" id="editPenaltyMember" disabled>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Amount (TZS)</label>
+                            <input type="number" id="editPenaltyAmount" class="form-control" required min="1">
+                            <small class="text-muted">Cannot be less than already paid amount</small>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Description</label>
+                            <input type="text" id="editPenaltyDesc" class="form-control">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Already Paid</label>
+                            <input type="text" class="form-control" id="editPenaltyPaid" disabled>
+                        </div>
+                        <button class="btn btn-warning w-100"><i class="bi bi-save"></i> Update</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card shadow-sm p-3">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle" id="penalties-table">
+                <thead class="table-danger">
+                    <tr>
+                        <th>Member</th>
+                        <th>Type</th>
+                        <th>Original Amount</th>
+                        <th>Amount Paid</th>
+                        <th class="text-danger">Remaining Due</th>
+                        <th>Description</th>
+                        <th>Date Imposed</th>
+                        <th>Payment</th>
+                        <th class="text-center">Edit</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+const API_MEMBERS = "/api/members";
+const API_PENALTIES = "/api/penalties";
+const API_PAYMENT = "/api/record_penalty_payment";
+
+function escapeHtml(s){ 
+    return (s===null||s===undefined) ? '' : String(s).replace(/[&<>"']/g, c=>({ 
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' 
+    })[c]); 
+}
+
+async function loadMembers() {
+    const res = await fetch(API_MEMBERS);
+    if(!res.ok) return;
+    const members = await res.json();
+    const sel = document.getElementById("penalty-member-id");
+    sel.innerHTML = '<option value="">Select Member</option>';
+    members.forEach(m => sel.innerHTML += `<option value="${m.id}">${m.name}</option>`);
+}
+
+async function loadPenalties() {
+    const res = await fetch(API_PENALTIES);
+    if(!res.ok) return;
+    const data = await res.json();
+    const tbody = document.querySelector("#penalties-table tbody");
+    tbody.innerHTML = "";
+
+    document.getElementById("total-penalty-due").innerText = data.total_outstanding.toLocaleString() + " TZS";
+
+    data.ledger.forEach(p => {
+        const typeBadge = p.type === "loan_late" 
+            ? `<span class="badge bg-danger">Auto Loan</span>` 
+            : `<span class="badge bg-secondary">Manual</span>`;
+        const remaining = p.amount - p.amount_paid;
+        
+        const isAutoLoan = p.type === "loan_late";
+        
+        const paymentHtml = remaining > 0 ? 
+            `<button class="btn btn-sm btn-outline-danger pay-penalty-btn" 
+                     data-penalty-id="${p.id}"
+                     data-remaining-due="${remaining}"
+                     data-member-name="${p.member_name}">
+                Pay
+            </button>` :
+            `<span class="badge bg-success">Paid</span>`;
+        
+        const editHtml = isAutoLoan 
+            ? `<span class="badge bg-secondary">Auto</span>`
+            : `
+                <button class="btn btn-sm btn-outline-warning edit-penalty-btn"
+                        data-id="${p.id}"
+                        data-member="${p.member_name}"
+                        data-amount="${p.amount}"
+                        data-paid="${p.amount_paid}"
+                        data-desc="${escapeHtml(p.description || '')}">
+                    <i class="bi bi-pencil"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger delete-penalty-btn"
+                        data-id="${p.id}"
+                        data-member="${p.member_name}">
+                    <i class="bi bi-trash"></i>
+                </button>
+            `;
+        
+        tbody.innerHTML += `<tr>
+            <td>${escapeHtml(p.member_name)}</td>
+            <td>${typeBadge}</td>
+            <td>${Number(p.amount).toLocaleString()} TZS</td>
+            <td>${Number(p.amount_paid).toLocaleString()} TZS</td>
+            <td class="fw-bold ${remaining > 0 ? 'text-danger' : 'text-success'}">${remaining.toLocaleString()} TZS</td>
+            <td>${escapeHtml(p.description || '-')}</td>
+            <td>${p.date}</td>
+            <td>${paymentHtml}</td>
+            <td class="text-center">${editHtml}</td>
+        </tr>`;
+    });
+    
+    // Attach event listeners
+    document.querySelectorAll(".pay-penalty-btn").forEach(btn => {
+        btn.addEventListener('click', handlePayment);
+    });
+    document.querySelectorAll(".edit-penalty-btn").forEach(btn => {
+        btn.addEventListener('click', handleEdit);
+    });
+    document.querySelectorAll(".delete-penalty-btn").forEach(btn => {
+        btn.addEventListener('click', handleDelete);
+    });
+}
+
+function handleEdit(e) {
+    const btn = e.currentTarget;
+    document.getElementById('editPenaltyId').value = btn.dataset.id;
+    document.getElementById('editPenaltyMember').value = btn.dataset.member;
+    document.getElementById('editPenaltyAmount').value = btn.dataset.amount;
+    document.getElementById('editPenaltyPaid').value = Number(btn.dataset.paid).toLocaleString() + ' TZS';
+    document.getElementById('editPenaltyDesc').value = btn.dataset.desc;
+    
+    new bootstrap.Modal(document.getElementById('editPenaltyModal')).show();
+}
+
+async function handleDelete(e) {
+    const btn = e.currentTarget;
+    const id = btn.dataset.id;
+    const member = btn.dataset.member;
+
+    if (!confirm(`Delete penalty for ${member}?`)) return;
+
+    try {
+        const res = await fetch(`${API_PENALTIES}/${id}`, { method: 'DELETE' });
+        const data = await res.json();
+
+        if (res.ok) {
+            alert(data.message || 'Penalty deleted');
+            loadPenalties();
+        } else {
+            alert(data.error || 'Failed to delete');
+        }
+    } catch (error) {
+        alert('Network error');
+        console.error(error);
+    }
+}
+
+async function handlePayment(e) {
+    const btn = e.currentTarget;
+    const penaltyId = parseInt(btn.dataset.penaltyId);
+    const remainingDue = parseFloat(btn.dataset.remainingDue);
+    const memberName = btn.dataset.memberName;
+    
+    if (remainingDue <= 0) return;
+    
+    const amountStr = prompt(`Enter payment amount (TZS) for ${memberName}'s penalty (Max: ${remainingDue.toLocaleString()})`);
+    
+    if (amountStr === null || amountStr.trim() === "") return;
+    
+    const amount = parseFloat(amountStr);
+    
+    if (isNaN(amount) || amount <= 0) return alert("Invalid amount entered.");
+
+    try {
+        const res = await fetch(`${API_PAYMENT}/${penaltyId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount: amount })
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+            alert(data.message);
+            await loadPenalties();
+        } else {
+            alert("Error recording payment: " + data.error);
+        }
+    } catch (e) {
+        alert("A network error occurred while processing the payment.");
+        console.error(e);
+    }
+}
+
+document.getElementById("add-penalty-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const member_id = document.getElementById("penalty-member-id").value;
+    const amount = Number(document.getElementById("penalty-amount").value || 0);
+    const description = document.getElementById("penalty-desc").value || '';
+    
+    if(!member_id || amount <= 0) return alert("Select member and enter amount greater than zero.");
+
+    const res = await fetch(API_PENALTIES, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({member_id, type: 'manual', amount, description}) 
+    });
+    
+    const body = await res.json();
+    if(res.ok && body.status === "success"){
+        document.getElementById("penalty-amount").value = "";
+        document.getElementById("penalty-desc").value = "";
+        await loadPenalties();
+    } else {
+        alert(body.error || "Failed to add penalty");
+    }
+});
+
+document.getElementById("edit-penalty-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const id = document.getElementById('editPenaltyId').value;
+    const amount = parseFloat(document.getElementById('editPenaltyAmount').value);
+    const description = document.getElementById('editPenaltyDesc').value;
+
+    try {
+        const res = await fetch(`${API_PENALTIES}/${id}`, {
+            method: "PUT",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ amount, description })
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+            alert(data.message || 'Penalty updated');
+            bootstrap.Modal.getInstance(document.getElementById('editPenaltyModal')).hide();
+            loadPenalties();
+        } else {
+            alert(data.error || 'Failed to update');
+        }
+    } catch (error) {
+        alert('Network error');
+        console.error(error);
+    }
+});
+
+loadMembers();
+loadPenalties();
+</script>
+
+{% endblock %}

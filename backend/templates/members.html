@@ -1,0 +1,264 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-3">
+    <h1 class="fw-bold text-dark">
+        <i class="fas fa-users me-2 text-success"></i>Group Members Ledger
+    </h1>
+    <button class="btn btn-success shadow-sm" data-bs-toggle="modal" data-bs-target="#addMemberModal">
+        <i class="fas fa-user-plus me-2"></i> Add Member
+    </button>
+</div>
+
+<!-- Add Member Modal -->
+<div class="modal fade" id="addMemberModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content shadow-lg border-0">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title">Add New Member</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="add-member-form">
+                    <div class="mb-3">
+                        <label class="form-label">Full Name</label>
+                        <input type="text" class="form-control" id="memberName" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Phone (optional)</label>
+                        <input type="text" class="form-control" id="memberPhone">
+                    </div>
+                    <button class="btn btn-success w-100">
+                        <i class="fas fa-save me-1"></i> Save Member
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Member Modal -->
+<div class="modal fade" id="editMemberModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content shadow-lg border-0">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title">Edit Member</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="edit-member-form">
+                    <input type="hidden" id="editMemberId">
+                    <div class="mb-3">
+                        <label class="form-label">Full Name</label>
+                        <input type="text" class="form-control" id="editMemberName" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Phone (optional)</label>
+                        <input type="text" class="form-control" id="editMemberPhone">
+                    </div>
+                    <button class="btn btn-warning w-100">
+                        <i class="fas fa-save me-1"></i> Update Member
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Search -->
+<div class="mb-3 d-flex justify-content-end">
+    <div class="input-group" style="max-width: 320px;">
+        <span class="input-group-text bg-light"><i class="fas fa-search"></i></span>
+        <input type="text" class="form-control" id="memberSearchInput" placeholder="Search member...">
+    </div>
+</div>
+
+<!-- Members Table -->
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-success">
+                <tr>
+                    <th>Member</th>
+                    <th>Phone</th>
+                    <th class="text-end">Contributions</th>
+                    <th class="text-end">Loans Taken</th>
+                    <th class="text-end text-warning">Jamii Expected</th>
+                    <th class="text-end text-success">Jamii Paid</th>
+                    <th class="text-end text-danger">Jamii Shortfall</th>
+                    <th class="text-end text-danger">Loans Due</th>
+                    <th class="text-end">Penalties</th>
+                    <th class="text-center">Status</th>
+                    <th class="text-center">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="membersTableBody"></tbody>
+        </table>
+    </div>
+    <div id="noMembersFound" class="alert alert-info text-center d-none m-3">
+        No members match your search.
+    </div>
+</div>
+
+<script>
+const API = "/api/members";
+let allMembers = [];
+
+function money(val) {
+    return `<strong>${(val || 0).toLocaleString()} TZS</strong>`;
+}
+
+function renderMembers(list) {
+    const body = document.getElementById("membersTableBody");
+    const empty = document.getElementById("noMembersFound");
+    body.innerHTML = "";
+
+    if (!list.length) {
+        empty.classList.remove("d-none");
+        return;
+    }
+    empty.classList.add("d-none");
+
+    list.forEach(m => {
+        const hasDebt = m.total_outstanding > 0 || m.total_penalties > 0 || m.jamii_shortfall > 0;
+        const status = hasDebt
+            ? `<span class="badge bg-danger">Outstanding</span>`
+            : `<span class="badge bg-success">Cleared</span>`;
+
+        body.innerHTML += `
+            <tr>
+                <td class="fw-bold">${m.name}</td>
+                <td>${m.phone || "—"}</td>
+                <td class="text-end">${money(m.total_contributions)}</td>
+                <td class="text-end">${money(m.total_loans_committed)}</td>
+                <td class="text-end text-warning">${money(m.jamii_expected)}</td>
+                <td class="text-end text-success">${money(m.jamii_paid)}</td>
+                <td class="text-end text-danger">${money(m.jamii_shortfall)}</td>
+                <td class="text-end text-danger">${money(m.total_outstanding)}</td>
+                <td class="text-end">${money(m.total_penalties)}</td>
+                <td class="text-center">${status}</td>
+                <td class="text-center">
+                    <button class="btn btn-sm btn-outline-warning edit-btn" data-id="${m.id}" data-name="${m.name}" data-phone="${m.phone || ''}">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger delete-btn" data-id="${m.id}" data-name="${m.name}">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </td>
+            </tr>
+        `;
+    });
+
+    // Attach event listeners
+    document.querySelectorAll('.edit-btn').forEach(btn => {
+        btn.addEventListener('click', handleEdit);
+    });
+    document.querySelectorAll('.delete-btn').forEach(btn => {
+        btn.addEventListener('click', handleDelete);
+    });
+}
+
+function handleEdit(e) {
+    const btn = e.currentTarget;
+    const id = btn.dataset.id;
+    const name = btn.dataset.name;
+    const phone = btn.dataset.phone;
+
+    document.getElementById('editMemberId').value = id;
+    document.getElementById('editMemberName').value = name;
+    document.getElementById('editMemberPhone').value = phone;
+
+    new bootstrap.Modal(document.getElementById('editMemberModal')).show();
+}
+
+async function handleDelete(e) {
+    const btn = e.currentTarget;
+    const id = btn.dataset.id;
+    const name = btn.dataset.name;
+
+    if (!confirm(`Delete member "${name}"?\n\nThis will only work if they have no contributions, loans, or penalties.`)) {
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API}/${id}`, { method: 'DELETE' });
+        const data = await res.json();
+
+        if (res.ok) {
+            alert(data.message || 'Member deleted');
+            loadMembers();
+        } else {
+            alert(data.error || 'Failed to delete member');
+        }
+    } catch (error) {
+        alert('Network error occurred');
+        console.error(error);
+    }
+}
+
+async function loadMembers() {
+    const res = await fetch(API);
+    allMembers = await res.json();
+    renderMembers(allMembers);
+}
+
+document.getElementById("memberSearchInput").addEventListener("input", e => {
+    const q = e.target.value.toLowerCase();
+    renderMembers(allMembers.filter(m =>
+        m.name.toLowerCase().includes(q) ||
+        (m.phone && m.phone.includes(q))
+    ));
+});
+
+document.getElementById("add-member-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const name = memberName.value;
+    const phone = memberPhone.value;
+
+    const res = await fetch(API, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ name, phone })
+    });
+
+    if (res.ok) {
+        bootstrap.Modal.getInstance(addMemberModal).hide();
+        e.target.reset();
+        loadMembers();
+    } else {
+        alert("Failed to add member");
+    }
+});
+
+document.getElementById("edit-member-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const id = document.getElementById('editMemberId').value;
+    const name = document.getElementById('editMemberName').value;
+    const phone = document.getElementById('editMemberPhone').value;
+
+    try {
+        const res = await fetch(`${API}/${id}`, {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ name, phone })
+        });
+
+        const data = await res.json();
+
+        if (res.ok) {
+            alert(data.message || 'Member updated');
+            bootstrap.Modal.getInstance(document.getElementById('editMemberModal')).hide();
+            loadMembers();
+        } else {
+            alert(data.error || 'Failed to update member');
+        }
+    } catch (error) {
+        alert('Network error occurred');
+        console.error(error);
+    }
+});
+
+document.addEventListener("DOMContentLoaded", loadMembers);
+</script>
+
+{% endblock %}

@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="container-fluid py-4">
+  <h2 class="mb-3 text-success">Loans</h2>
+
+  <!-- Add Loan form -->
+  <div class="card shadow-sm mb-4 p-4">
+    <h5 class="mb-2 text-success">Give New Loan</h5>
+    <form id="add-loan-form" class="row g-3 align-items-center">
+      <div class="col-md-5">
+        <select id="loan-member-id" class="form-select" required>
+          <option value="">Select Member</option>
+        </select>
+      </div>
+      <div class="col-md-5">
+        <input type="number" id="loan-principal" class="form-control" placeholder="Principal Amount (TZS)" required>
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-success w-100" type="submit"><i class="bi bi-plus-circle"></i> Add Loan</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Loans table -->
+  <div class="card shadow-sm p-3">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle" id="loans-table">
+        <thead class="table-success">
+          <tr>
+            <th>Member</th>
+            <th>Principal</th>
+            <th>Interest</th>
+            <th>Total</th>
+            <th>Start</th>
+            <th>Due</th>
+            <th>Returned</th>
+            <th>Remaining</th>
+            <th>Status</th>
+            <th>Penalty</th>
+            <th>Rejesho</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const API_MEMBERS = "/api/members";
+const API_LOANS = "/api/loans";
+const API_REJESHO = "/api/rejesho"; // POST to add repayment
+
+// load members into select
+async function loadMembersDropdown() {
+  const res = await fetch(API_MEMBERS);
+  if (!res.ok) return;
+  const members = await res.json();
+  const sel = document.getElementById("loan-member-id");
+  sel.innerHTML = '<option value="">Select Member</option>';
+  members.forEach(m => sel.innerHTML += `<option value="${m.id}">${m.name}</option>`);
+}
+
+// render loans table
+async function loadLoans() {
+  const res = await fetch(API_LOANS);
+  if (!res.ok) return;
+  const loans = await res.json();
+  const tbody = document.querySelector("#loans-table tbody");
+  tbody.innerHTML = "";
+
+  loans.forEach(l => {
+    // status badge
+    const st = (String(l.status || "").toLowerCase());
+    const statusBadge = st === "cleared"
+      ? `<span class="badge bg-secondary">Cleared</span>`
+      : st === "overdue"
+        ? `<span class="badge bg-danger">Overdue</span>`
+        : `<span class="badge bg-success">Active</span>`;
+
+    // make sure numeric fields exist
+    const principal = Number(l.principal || 0);
+    const interest = Number(l.interest || 0);
+    const total = Number(l.total || 0);
+    const returned = Number(l.amount_returned || 0);
+    const remaining = Number(l.remaining || 0);
+    const penalty = Number(l.penalty || 0);
+
+    tbody.insertAdjacentHTML("beforeend", `
+      <tr data-loan-id="${l.loan_id}">
+        <td>${escapeHtml(l.member_name)}</td>
+        <td>${principal.toLocaleString()} TZS</td>
+        <td>${interest.toLocaleString()} TZS</td>
+        <td>${total.toLocaleString()} TZS</td>
+        <td>${l.start_date}</td>
+        <td>${l.due_date}</td>
+        <td>${returned.toLocaleString()} TZS</td>
+        <td>${remaining.toLocaleString()} TZS</td>
+        <td>${statusBadge}</td>
+        <td>${penalty.toLocaleString()} TZS</td>
+        <td style="min-width:210px">
+          <div class="d-flex">
+            <input type="number" class="form-control form-control-sm rejesho-amount" placeholder="Amount">
+            <button class="btn btn-success btn-sm ms-2 add-rejesho-btn">Add</button>
+            <button class="btn btn-outline-secondary btn-sm ms-2 view-rejesho-btn">View</button>
+          </div>
+        </td>
+      </tr>
+    `);
+  });
+}
+
+// helper: avoid XSS
+function escapeHtml(s){ return (s===null||s===undefined) ? '' : String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c]); }
+
+// add loan
+document.getElementById("add-loan-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const member_id = document.getElementById("loan-member-id").value;
+  const principal = document.getElementById("loan-principal").value;
+  if(!member_id || !principal) return alert("Select member and enter principal.");
+
+  const res = await fetch(API_LOANS, {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({member_id, principal})
+  });
+  const data = await res.json();
+  if(res.ok && data.status === "success"){
+    document.getElementById("loan-principal").value = "";
+    await loadLoans();
+  } else {
+    alert(data.error || "Failed to add loan");
+  }
+});
+
+// delegate clicks for adding rejesho and viewing repayments
+document.querySelector("#loans-table tbody").addEventListener("click", async (e) => {
+  const row = e.target.closest("tr");
+  if(!row) return;
+  const loanId = row.dataset.loanId;
+
+  // add rejesho
+  if(e.target.classList.contains("add-rejesho-btn")){
+    const amtInput = row.querySelector(".rejesho-amount");
+    const amount = Number(amtInput.value || 0);
+    if(!amount || amount <= 0) return alert("Enter valid amount");
+    const res = await fetch(API_REJESHO, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({loan_id: loanId, amount})
+    });
+    const data = await res.json();
+    if(res.ok && data.status === "success"){
+      amtInput.value = "";
+      await loadLoans();
+    } else {
+      alert(data.error || "Failed to add repayment");
+    }
+  }
+
+  // view rejesho -> open repayments page for that loan (new page)
+  if(e.target.classList.contains("view-rejesho-btn")){
+    // navigate to repayments page with loan id param
+    window.location.href = `/repayments-page?loan_id=${loanId}`;
+  }
+});
+
+// initial
+loadMembersDropdown();
+loadLoans();
+</script>
+
+{% endblock %}

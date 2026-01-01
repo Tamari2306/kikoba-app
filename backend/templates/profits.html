@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid py-4">
+    <h2 class="mb-4">💰 Year-End Profit Distribution Calculation</h2>
+
+    <div class="card shadow-sm p-4 mb-4">
+        <form id="profit-controls-form" class="row g-3 align-items-end"> 
+            <div class="col-md-4">
+                <label class="form-label fw-bold">Proposed Additional Jamii Expense (TZS)</label>
+                <input type="number" id="jamii-used-input" class="form-control" value="0" min="0">
+                <small class="text-muted">Add new Jamii expenses for this distribution</small>
+            </div>
+            
+            <div class="col-md-2">
+                <button class="btn btn-success w-100" type="submit">Calculate</button> 
+            </div>
+            
+            <div class="col-md-2">
+                <button class="btn btn-danger w-100" type="button" id="save-jamii-btn" disabled>Save Expense</button>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label fw-bold">Distribution Method</label>
+                <select id="method-select" class="form-select">
+                    <option value="cash">Simple Cash (Current Balance)</option>
+                    <option value="weighted">Weighted (Time-based Savings)</option>
+                </select>
+            </div>
+        </form>
+    </div>
+
+    <div class="row mb-4 text-center g-3">
+        <div class="col-md-3">
+            <div class="p-3 border rounded bg-primary text-white">
+                <strong>Gross Pool</strong><br>
+                <small>(Interest + Penalties + Expected Jamii)</small><br>
+                <span id="gross-pool-display" class="h4">0</span> TZS
+            </div>
+        </div>
+        
+        <div class="col-md-3">
+            <div class="p-3 border rounded bg-warning text-dark">
+                <strong>Leadership Pay</strong><br>
+                <small>(Mandatory Deduction)</small><br>
+                <span id="mandatory-deduction-display" class="h4">0</span> TZS
+            </div>
+        </div>
+        
+        <div class="col-md-3">
+            <div class="p-3 border rounded bg-danger text-white">
+                <strong>Total Jamii Expenses</strong><br>
+                <small>(Historical + Proposed)</small><br>
+                <span id="jamii-total-deduction-display" class="h4">0</span> TZS
+            </div>
+        </div>
+        
+        <div class="col-md-3">
+            <div class="p-3 border rounded bg-success text-white">
+                <strong>Net Profit to Share</strong><br>
+                <small>(After all deductions)</small><br>
+                <span id="net-profit-display" class="h4">0</span> TZS
+            </div>
+        </div>
+    </div>
+
+    <div class="card shadow-sm p-3">
+        <table class="table table-hover align-middle" id="profits-table">
+            <thead class="table-success">
+                <tr>
+                    <th>Member</th>
+                    <th>Hisa (Savings)</th>
+                    <th class="text-success">Profit Share</th>
+                    <th class="text-danger">Loan Due</th>
+                    <th class="text-danger">Penalties</th>
+                    <th class="text-warning">Jamii Shortfall</th>
+                    <th class="text-danger">Total Deductions</th>
+                    <th class="text-primary fw-bold">Final Payout</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+const TEMP_JAMII_KEY = "temp_jamii_deduction_amount";
+
+function formatTZS(val) {
+    return Number(val || 0).toLocaleString();
+}
+
+async function loadProfits() {
+    const temp_jamii_used = parseFloat(document.getElementById("jamii-used-input").value) || 0;
+    localStorage.setItem(TEMP_JAMII_KEY, temp_jamii_used);
+
+    document.getElementById("save-jamii-btn").disabled = temp_jamii_used <= 0;
+    const method = document.getElementById("method-select").value;
+    
+    try {
+        const res = await fetch("/api/profits", {
+            method: "POST",
+            headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ jamii_used: temp_jamii_used, method }) 
+        });
+        const data = await res.json();
+
+        if (data.error) {
+            alert("Error: " + data.error);
+            return;
+        }
+
+        // Update summary cards
+        document.getElementById("gross-pool-display").innerText = formatTZS(data.gross_distributable_pool);
+        document.getElementById("mandatory-deduction-display").innerText = formatTZS(data.leadership_pay_amount);
+        document.getElementById("jamii-total-deduction-display").innerText = formatTZS(data.total_jamii_expenses);
+        document.getElementById("net-profit-display").innerText = formatTZS(data.net_profit_to_distribute);
+
+        // Update table
+        const tbody = document.querySelector("#profits-table tbody");
+        tbody.innerHTML = "";
+        
+        data.breakdown.forEach(m => {
+            const payoutClass = m.total_payout >= 0 ? 'text-success' : 'text-danger';
+            
+            tbody.innerHTML += `<tr>
+                <td>${m.member_name}</td>
+                <td>${formatTZS(m.savings)} TZS</td>
+                <td class="text-success">+ ${formatTZS(m.profit_share)} TZS</td>
+                <td class="text-danger">${formatTZS(m.loan_balance_due)} TZS</td>
+                <td class="text-danger">${formatTZS(m.penalties_due)} TZS</td>
+                <td class="text-warning">${formatTZS(m.jamii_shortfall)} TZS</td>
+                <td class="text-danger fw-bold">${formatTZS(m.total_deductions)} TZS</td>
+                <td class="fw-bold ${payoutClass}">${formatTZS(m.total_payout)} TZS</td>
+            </tr>`;
+        });
+
+    } catch (e) {
+        alert("Network error occurred.");
+        console.error("Error:", e);
+    }
+}
+
+async function saveJamiiDeduction() {
+    const amount = parseFloat(document.getElementById("jamii-used-input").value) || 0;
+    if (amount <= 0) {
+        alert("Please enter a positive amount.");
+        return;
+    }
+    
+    if (!confirm(`Record Jamii expense of ${amount.toLocaleString()} TZS? This cannot be undone.`)) {
+        return;
+    }
+
+    const res = await fetch("/api/jamii_deduction", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ amount })
+    });
+    
+    const data = await res.json();
+    if (res.ok) {
+        alert(data.message);
+        document.getElementById("jamii-used-input").value = 0;
+        localStorage.removeItem(TEMP_JAMII_KEY);
+        loadProfits();
+    } else {
+        alert("Error: " + data.error);
+    }
+}
+
+function initializeProfitsPage() {
+    const saved_jamii = parseFloat(localStorage.getItem(TEMP_JAMII_KEY)) || 0;
+    document.getElementById("jamii-used-input").value = saved_jamii;
+    loadProfits();
+}
+
+document.getElementById("profit-controls-form").addEventListener("submit", (e) => {
+    e.preventDefault(); 
+    loadProfits();
+});
+
+document.getElementById("method-select").addEventListener("change", loadProfits);
+document.getElementById("save-jamii-btn").addEventListener("click", saveJamiiDeduction);
+
+window.onload = initializeProfitsPage;
+</script>
+{% endblock %}

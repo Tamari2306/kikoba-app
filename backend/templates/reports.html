@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2 class="text-success mb-0">📊 Monthly Group Report</h2>
+        <button id="download-pdf" class="btn btn-success">
+            <i class="bi bi-download me-1"></i> Download PDF
+        </button>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="row mb-4 g-3">
+        <div class="col-lg-3 col-md-6">
+            <div class="card shadow-sm text-white bg-primary h-100">
+                <div class="card-body d-flex align-items-center justify-content-between">
+                    <div>
+                        <h6 class="card-title mb-1">Total Contributions</h6>
+                        <h3 id="total-contributions" class="fw-bold">0 TZS</h3>
+                    </div>
+                    <i class="bi bi-cash-stack fs-1 opacity-50"></i>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <div class="card shadow-sm text-dark bg-warning h-100">
+                <div class="card-body d-flex align-items-center justify-content-between">
+                    <div>
+                        <h6 class="card-title mb-1">Total Loans Taken</h6>
+                        <h3 id="total-loans" class="fw-bold">0 TZS</h3>
+                    </div>
+                    <i class="bi bi-wallet2 fs-1 opacity-50"></i>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <div class="card shadow-sm text-white bg-danger h-100">
+                <div class="card-body d-flex align-items-center justify-content-between">
+                    <div>
+                        <h6 class="card-title mb-1">Total Penalties</h6>
+                        <h3 id="total-penalties" class="fw-bold">0 TZS</h3>
+                    </div>
+                    <i class="bi bi-exclamation-triangle fs-1 opacity-50"></i>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6">
+            <div class="card shadow-sm text-white bg-success h-100">
+                <div class="card-body d-flex align-items-center justify-content-between">
+                    <div>
+                        <h6 class="card-title mb-1">Total Loans Due</h6>
+                        <h3 id="total-loans-due" class="fw-bold">0 TZS</h3>
+                    </div>
+                    <i class="bi bi-clock-history fs-1 opacity-50"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top Contributors & Largest Loaners -->
+    <div class="row mb-4 g-3">
+        <div class="col-lg-6 col-md-6">
+            <div class="card shadow-sm p-3 h-100">
+                <h6 class="fw-bold mb-3 text-primary"><i class="bi bi-star-fill me-2"></i>Top Contributors</h6>
+                <ul id="top-contributors" class="list-group list-group-flush"></ul>
+            </div>
+        </div>
+        <div class="col-lg-6 col-md-6">
+            <div class="card shadow-sm p-3 h-100">
+                <h6 class="fw-bold mb-3 text-warning"><i class="bi bi-wallet2 me-2"></i>Largest Loaners</h6>
+                <ul id="largest-loans" class="list-group list-group-flush"></ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Table -->
+    <div class="card shadow-sm p-3">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle" id="report-table">
+                <thead class="table-success">
+                    <tr>
+                        <th>Member</th>
+                        <th>Hisa Anzia</th>
+                        <th>Hisa</th>
+                        <th>Jamii Paid</th>
+                        <th>Jamii Expected</th>
+                        <th class="text-warning">Jamii Shortfall</th>
+                        <th>Total Contributions</th>
+                        <th>Loans Taken</th>
+                        <th>Rejesho Paid</th>
+                        <th>Remaining Loans</th>
+                        <th>Penalties</th>
+                        <th class="table-warning">Net Hisa </th>
+                        <th class="table-info">Profit Share</th>
+                        <th>Profit %</th>
+                        <th class="table-success fw-bold">Net Payout</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+const API_REPORT = "/api/reports";
+const API_DOWNLOAD = "/reports-page/download";
+
+async function loadReport() {
+    const res = await fetch(API_REPORT);
+    const data = await res.json();
+    const tbody = document.querySelector("#report-table tbody");
+    tbody.innerHTML = "";
+
+    let totalContributions = 0;
+    let totalLoans = 0;
+    let totalPenalties = 0;
+    let totalProfitShare = 0;
+    let totalLoansDue = 0;
+
+    const totalProfit = data.report.reduce((sum, m) => sum + m.expected_profit_share, 0);
+
+    // Clear top lists
+    const topContributors = document.getElementById("top-contributors");
+    const largestLoans = document.getElementById("largest-loans");
+    topContributors.innerHTML = "";
+    largestLoans.innerHTML = "";
+
+    // Top 3
+    const top3Contributors = [...data.report].sort((a,b) => b.total_contributions - a.total_contributions).slice(0,3);
+    const top3Loans = [...data.report].sort((a,b) => b.total_loans - a.total_loans).slice(0,3);
+
+    top3Contributors.forEach((m,i) => {
+        topContributors.innerHTML += `<li class="list-group-item d-flex justify-content-between align-items-center">
+            ${i+1}. ${m.member_name}
+            <span class="badge bg-primary rounded-pill">${m.total_contributions.toLocaleString()} TZS</span>
+        </li>`;
+    });
+
+    top3Loans.forEach((m,i) => {
+        largestLoans.innerHTML += `<li class="list-group-item d-flex justify-content-between align-items-center">
+            ${i+1}. ${m.member_name}
+            <span class="badge bg-warning rounded-pill">${m.total_loans.toLocaleString()} TZS</span>
+        </li>`;
+    });
+
+    data.report.forEach(m => {
+        const profitPercent = totalProfit > 0 ? ((m.expected_profit_share / totalProfit) * 100).toFixed(1) : 0;
+        const jamiiShortfallClass = m.jamii_shortfall > 0 ? 'text-danger fw-bold' : '';
+
+        tbody.innerHTML += `<tr>
+            <td>${m.member_name}</td>
+            <td>${(m.contributions['hisa anzia'] || 0).toLocaleString()} TZS</td>
+            <td>${(m.contributions['hisa'] || 0).toLocaleString()} TZS</td>
+            <td>${m.jamii_paid.toLocaleString()} TZS</td>
+            <td>${m.jamii_expected.toLocaleString()} TZS</td>
+            <td class="${jamiiShortfallClass}">${m.jamii_shortfall.toLocaleString()} TZS</td>
+            <td>${m.total_contributions.toLocaleString()} TZS</td>
+            <td>${m.total_loans.toLocaleString()} TZS</td>
+            <td>${m.total_rejesho.toLocaleString()} TZS</td>
+            <td>${m.remaining_loans.toLocaleString()} TZS</td>
+            <td>${m.total_penalties.toLocaleString()} TZS</td>
+            <td class="table-warning fw-bold">${m.net_contribution_position.toLocaleString()} TZS</td> 
+            <td class="table-info fw-bold">${m.expected_profit_share.toLocaleString()} TZS</td>
+            <td class="text-success fw-bold">${profitPercent}%</td>
+            <td class="table-success fw-bold">${m.net_payout.toLocaleString()} TZS</td>
+        </tr>`;
+
+        totalContributions += m.total_contributions;
+        totalLoans += m.total_loans;
+        totalLoansDue += m.remaining_loans;
+        totalPenalties += m.total_penalties;
+        totalProfitShare += m.expected_profit_share;
+    });
+
+    // Update summary cards
+    document.getElementById("total-contributions").innerText = totalContributions.toLocaleString() + " TZS";
+    document.getElementById("total-loans").innerText = totalLoans.toLocaleString() + " TZS";
+    document.getElementById("total-loans-due").innerText = totalLoansDue.toLocaleString() + " TZS";
+    document.getElementById("total-penalties").innerText = totalPenalties.toLocaleString() + " TZS";
+}
+
+document.getElementById("download-pdf").addEventListener("click", () => {
+    window.location.href = API_DOWNLOAD;
+});
+
+loadReport();
+</script>
+{% endblock %}
