@@ -1,187 +1,213 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="container-fluid py-4">
-    <h2 class="mb-4">💰 Year-End Profit Distribution Calculation</h2>
 
-    <div class="card shadow-sm p-4 mb-4">
-        <form id="profit-controls-form" class="row g-3 align-items-end"> 
-            <div class="col-md-4">
-                <label class="form-label fw-bold">Proposed Additional Jamii Expense (TZS)</label>
-                <input type="number" id="jamii-used-input" class="form-control" value="0" min="0">
-                <small class="text-muted">Add new Jamii expenses for this distribution</small>
-            </div>
-            
-            <div class="col-md-2">
-                <button class="btn btn-success w-100" type="submit">Calculate</button> 
-            </div>
-            
-            <div class="col-md-2">
-                <button class="btn btn-danger w-100" type="button" id="save-jamii-btn" disabled>Save Expense</button>
-            </div>
+<div class="mb-4">
+    <h1 class="fw-bold"><i class="fas fa-chart-line me-2 text-success"></i>Profit Distribution</h1>
+    <p class="text-muted">Calculate and distribute profits based on HISA units (includes both Hisa and Jamii contributions)</p>
+</div>
 
-            <div class="col-md-4">
-                <label class="form-label fw-bold">Distribution Method</label>
-                <select id="method-select" class="form-select">
-                    <option value="cash">Simple Cash (Current Balance)</option>
-                    <option value="weighted">Weighted (Time-based Savings)</option>
-                </select>
-            </div>
-        </form>
-    </div>
+<div class="alert alert-info">
+    <h5 class="alert-heading"><i class="fas fa-info-circle me-2"></i>How Profit Distribution Works</h5>
+    <ul class="mb-0">
+        <li><strong>Profit Sources:</strong> Interest from loans + Penalties collected</li>
+        <li><strong>Deductions:</strong> Leadership Pay only</li>
+        <li><strong>Distribution Method:</strong> Net profit divided equally among all HISA units</li>
+        <li><strong>Member Payout:</strong> Savings (Hisa + Jamii) + Profit Share - Loans Due - Penalties Due</li>
+        <li><strong>⚠️ Important:</strong> Jamii is NO LONGER deducted from profits - it's returned to members like regular savings!</li>
+    </ul>
+</div>
 
-    <div class="row mb-4 text-center g-3">
+<button id="calculateBtn" class="btn btn-success btn-lg mb-4">
+    <i class="fas fa-calculator me-2"></i> Calculate Profit Distribution
+</button>
+
+<!-- Results Section -->
+<div id="resultsSection" class="d-none">
+    <!-- Summary Cards -->
+    <div class="row g-3 mb-4">
         <div class="col-md-3">
-            <div class="p-3 border rounded bg-primary text-white">
-                <strong>Gross Pool</strong><br>
-                <small>(Interest + Penalties + Expected Jamii)</small><br>
-                <span id="gross-pool-display" class="h4">0</span> TZS
+            <div class="card border-primary">
+                <div class="card-body">
+                    <h6 class="text-muted">Total Interest</h6>
+                    <h4 id="totalInterest" class="text-primary mb-0">0 TZS</h4>
+                </div>
             </div>
         </div>
-        
         <div class="col-md-3">
-            <div class="p-3 border rounded bg-warning text-dark">
-                <strong>Leadership Pay</strong><br>
-                <small>(Mandatory Deduction)</small><br>
-                <span id="mandatory-deduction-display" class="h4">0</span> TZS
+            <div class="card border-warning">
+                <div class="card-body">
+                    <h6 class="text-muted">Total Penalties</h6>
+                    <h4 id="totalPenalties" class="text-warning mb-0">0 TZS</h4>
+                </div>
             </div>
         </div>
-        
         <div class="col-md-3">
-            <div class="p-3 border rounded bg-danger text-white">
-                <strong>Total Jamii Expenses</strong><br>
-                <small>(Historical + Proposed)</small><br>
-                <span id="jamii-total-deduction-display" class="h4">0</span> TZS
+            <div class="card border-danger">
+                <div class="card-body">
+                    <h6 class="text-muted">Leadership Pay</h6>
+                    <h4 id="leadershipPay" class="text-danger mb-0">0 TZS</h4>
+                </div>
             </div>
         </div>
-        
         <div class="col-md-3">
-            <div class="p-3 border rounded bg-success text-white">
-                <strong>Net Profit to Share</strong><br>
-                <small>(After all deductions)</small><br>
-                <span id="net-profit-display" class="h4">0</span> TZS
+            <div class="card border-success">
+                <div class="card-body">
+                    <h6 class="text-muted">Net Profit to Distribute</h6>
+                    <h4 id="netProfit" class="text-success mb-0">0 TZS</h4>
+                </div>
             </div>
         </div>
     </div>
 
-    <div class="card shadow-sm p-3">
-        <table class="table table-hover align-middle" id="profits-table">
-            <thead class="table-success">
-                <tr>
-                    <th>Member</th>
-                    <th>Hisa (Savings)</th>
-                    <th class="text-success">Profit Share</th>
-                    <th class="text-danger">Loan Due</th>
-                    <th class="text-danger">Penalties</th>
-                    <th class="text-warning">Jamii Shortfall</th>
-                    <th class="text-danger">Total Deductions</th>
-                    <th class="text-primary fw-bold">Final Payout</th>
-                </tr>
-            </thead>
-            <tbody></tbody>
-        </table>
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="card border-info">
+                <div class="card-body">
+                    <h6 class="text-muted">Total HISA Units</h6>
+                    <h4 id="totalUnits" class="text-info mb-0">0 units</h4>
+                    <small class="text-muted">From Hisa</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-success">
+                <div class="card-body">
+                    <h6 class="text-muted">Profit Per Unit</h6>
+                    <h4 id="profitPerUnit" class="text-success mb-0">0 TZS</h4>
+                    <small class="text-muted">Each unit gets this amount</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-secondary">
+                <div class="card-body">
+                    <h6 class="text-muted">Gross Pool</h6>
+                    <h4 id="grossPool" class="text-secondary mb-0">0 TZS</h4>
+                    <small class="text-muted">Interest + Penalties</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Member Breakdown -->
+    <div class="card shadow-sm">
+        <div class="card-header bg-success text-white">
+            <h5 class="mb-0"><i class="fas fa-users me-2"></i>Member Profit Distribution</h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Member</th>
+                        <th class="text-end">HISA Units</th>
+                        <th class="text-end">Savings (Anzia+Hisa+Jamii)</th>
+                        <th class="text-end">Profit Share</th>
+                        <th class="text-end text-danger">Loans Due</th>
+                        <th class="text-end text-warning">Penalties Due</th>
+                        <th class="text-end">Total Deductions</th>
+                        <th class="text-end text-success">Final Payout</th>
+                    </tr>
+                </thead>
+                <tbody id="breakdownTable"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Export Button -->
+    <div class="mt-4">
+        <button id="exportBtn" class="btn btn-outline-primary">
+            <i class="fas fa-download me-2"></i> Export to Excel
+        </button>
     </div>
 </div>
 
 <script>
-const TEMP_JAMII_KEY = "temp_jamii_deduction_amount";
-
-function formatTZS(val) {
-    return Number(val || 0).toLocaleString();
+function formatTZS(v) {
+    return (v || 0).toLocaleString() + " TZS";
 }
 
-async function loadProfits() {
-    const temp_jamii_used = parseFloat(document.getElementById("jamii-used-input").value) || 0;
-    localStorage.setItem(TEMP_JAMII_KEY, temp_jamii_used);
-
-    document.getElementById("save-jamii-btn").disabled = temp_jamii_used <= 0;
-    const method = document.getElementById("method-select").value;
-    
+document.getElementById("calculateBtn").addEventListener("click", async () => {
     try {
         const res = await fetch("/api/profits", {
             method: "POST",
-            headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({ jamii_used: temp_jamii_used, method }) 
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({})
         });
+
         const data = await res.json();
 
-        if (data.error) {
-            alert("Error: " + data.error);
+        if (!res.ok) {
+            alert(data.error || "Failed to calculate profits");
             return;
         }
 
-        // Update summary cards
-        document.getElementById("gross-pool-display").innerText = formatTZS(data.gross_distributable_pool);
-        document.getElementById("mandatory-deduction-display").innerText = formatTZS(data.leadership_pay_amount);
-        document.getElementById("jamii-total-deduction-display").innerText = formatTZS(data.total_jamii_expenses);
-        document.getElementById("net-profit-display").innerText = formatTZS(data.net_profit_to_distribute);
+        // Display summary
+        document.getElementById("totalInterest").textContent = formatTZS(data.total_interest);
+        document.getElementById("totalPenalties").textContent = formatTZS(data.total_penalties);
+        document.getElementById("leadershipPay").textContent = formatTZS(data.leadership_pay_amount);
+        document.getElementById("grossPool").textContent = formatTZS(data.gross_distributable_pool);
+        document.getElementById("netProfit").textContent = formatTZS(data.net_profit_to_distribute);
+        document.getElementById("totalUnits").textContent = data.total_hisa_units.toFixed(2) + " units";
+        document.getElementById("profitPerUnit").textContent = formatTZS(data.profit_per_unit);
 
-        // Update table
-        const tbody = document.querySelector("#profits-table tbody");
-        tbody.innerHTML = "";
-        
-        data.breakdown.forEach(m => {
-            const payoutClass = m.total_payout >= 0 ? 'text-success' : 'text-danger';
-            
-            tbody.innerHTML += `<tr>
-                <td>${m.member_name}</td>
-                <td>${formatTZS(m.savings)} TZS</td>
-                <td class="text-success">+ ${formatTZS(m.profit_share)} TZS</td>
-                <td class="text-danger">${formatTZS(m.loan_balance_due)} TZS</td>
-                <td class="text-danger">${formatTZS(m.penalties_due)} TZS</td>
-                <td class="text-warning">${formatTZS(m.jamii_shortfall)} TZS</td>
-                <td class="text-danger fw-bold">${formatTZS(m.total_deductions)} TZS</td>
-                <td class="fw-bold ${payoutClass}">${formatTZS(m.total_payout)} TZS</td>
-            </tr>`;
-        });
+        // Display member breakdown
+        const tbody = document.getElementById("breakdownTable");
+        tbody.innerHTML = data.breakdown.map(m => `
+            <tr>
+                <td class="fw-bold">${m.member_name}</td>
+                <td class="text-end">${m.hisa_units.toFixed(2)}</td>
+                <td class="text-end">${formatTZS(m.savings)}</td>
+                <td class="text-end text-success">${formatTZS(m.profit_share)}</td>
+                <td class="text-end text-danger">${formatTZS(m.loan_balance_due)}</td>
+                <td class="text-end text-warning">${formatTZS(m.penalties_due)}</td>
+                <td class="text-end">${formatTZS(m.total_deductions)}</td>
+                <td class="text-end text-success"><strong>${formatTZS(m.total_payout)}</strong></td>
+            </tr>
+        `).join("");
 
-    } catch (e) {
-        alert("Network error occurred.");
-        console.error("Error:", e);
+        document.getElementById("resultsSection").classList.remove("d-none");
+
+        // Store data for export
+        window.profitData = data;
+
+    } catch (error) {
+        console.error("Error:", error);
+        alert("Failed to calculate profits. Please try again.");
     }
-}
-
-async function saveJamiiDeduction() {
-    const amount = parseFloat(document.getElementById("jamii-used-input").value) || 0;
-    if (amount <= 0) {
-        alert("Please enter a positive amount.");
-        return;
-    }
-    
-    if (!confirm(`Record Jamii expense of ${amount.toLocaleString()} TZS? This cannot be undone.`)) {
-        return;
-    }
-
-    const res = await fetch("/api/jamii_deduction", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ amount })
-    });
-    
-    const data = await res.json();
-    if (res.ok) {
-        alert(data.message);
-        document.getElementById("jamii-used-input").value = 0;
-        localStorage.removeItem(TEMP_JAMII_KEY);
-        loadProfits();
-    } else {
-        alert("Error: " + data.error);
-    }
-}
-
-function initializeProfitsPage() {
-    const saved_jamii = parseFloat(localStorage.getItem(TEMP_JAMII_KEY)) || 0;
-    document.getElementById("jamii-used-input").value = saved_jamii;
-    loadProfits();
-}
-
-document.getElementById("profit-controls-form").addEventListener("submit", (e) => {
-    e.preventDefault(); 
-    loadProfits();
 });
 
-document.getElementById("method-select").addEventListener("change", loadProfits);
-document.getElementById("save-jamii-btn").addEventListener("click", saveJamiiDeduction);
+document.getElementById("exportBtn").addEventListener("click", () => {
+    if (!window.profitData) {
+        alert("Please calculate profits first");
+        return;
+    }
 
-window.onload = initializeProfitsPage;
+    const data = window.profitData;
+    
+    let csv = "Member,HISA Units,Savings (Anzia+Hisa+Jamii),Profit Share,Loans Due,Penalties Due,Total Deductions,Final Payout\n";
+    
+    data.breakdown.forEach(m => {
+        csv += `"${m.member_name}",${m.hisa_units.toFixed(2)},${m.savings},${m.profit_share},${m.loan_balance_due},${m.penalties_due},${m.total_deductions},${m.total_payout}\n`;
+    });
+
+    csv += `\nSummary\n`;
+    csv += `Total Interest,${data.total_interest}\n`;
+    csv += `Total Penalties,${data.total_penalties}\n`;
+    csv += `Leadership Pay,${data.leadership_pay_amount}\n`;
+    csv += `Net Profit Distributed,${data.net_profit_to_distribute}\n`;
+    csv += `Total HISA Units,${data.total_hisa_units.toFixed(2)}\n`;
+    csv += `Profit Per Unit,${data.profit_per_unit.toFixed(2)}\n`;
+
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `profit_distribution_${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+});
 </script>
+
 {% endblock %}

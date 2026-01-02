@@ -72,6 +72,14 @@
         </div>
     </div>
 
+    <div class="alert alert-info">
+    <strong>ℹ️ Note:</strong> 
+    <ul class="mb-0">
+        <li><strong>Total Contributions:</strong> Includes all member contributions (Hisa Anzia + Hisa + Jamii + Penalty Payments)</li>
+        <li><strong>Total Savings:</strong> Only includes Hisa Anzia + Hisa + Jamii (money to be returned at cycle end)</li>
+    </ul>
+</div>
+
     <!-- Table -->
     <div class="card shadow-sm p-3">
         <div class="table-responsive">
@@ -79,20 +87,19 @@
                 <thead class="table-success">
                     <tr>
                         <th>Member</th>
-                        <th>Hisa Anzia</th>
-                        <th>Hisa</th>
-                        <th>Jamii Paid</th>
-                        <th>Jamii Expected</th>
-                        <th class="text-warning">Jamii Shortfall</th>
-                        <th>Total Contributions</th>
-                        <th>Loans Taken</th>
-                        <th>Rejesho Paid</th>
-                        <th>Remaining Loans</th>
-                        <th>Penalties</th>
-                        <th class="table-warning">Net Hisa </th>
-                        <th class="table-info">Profit Share</th>
-                        <th>Profit %</th>
-                        <th class="table-success fw-bold">Net Payout</th>
+                        <th class="text-end">HISA Units</th>
+                        <th class="text-end">Hisa Anzia</th>
+                        <th class="text-end">Hisa</th>
+                        <th class="text-end">Jamii</th>
+                        <th class="text-end">Total Savings</th>
+                        <th class="text-end">Principal Taken</th>
+                        <th class="text-end">Rejesho Paid</th>
+                        <th class="text-end">Principal Due</th>
+                        <th class="text-end">Penalties</th>
+                        <th class="text-end table-warning">Net Position</th>
+                        <th class="text-end table-info">Profit Share</th>
+                        <th class="text-end">Profit %</th>
+                        <th class="text-end table-success fw-bold">Net Payout</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
@@ -145,25 +152,23 @@ async function loadReport() {
 
     data.report.forEach(m => {
         const profitPercent = totalProfit > 0 ? ((m.expected_profit_share / totalProfit) * 100).toFixed(1) : 0;
-        const jamiiShortfallClass = m.jamii_shortfall > 0 ? 'text-danger fw-bold' : '';
 
         tbody.innerHTML += `<tr>
-            <td>${m.member_name}</td>
-            <td>${(m.contributions['hisa anzia'] || 0).toLocaleString()} TZS</td>
-            <td>${(m.contributions['hisa'] || 0).toLocaleString()} TZS</td>
-            <td>${m.jamii_paid.toLocaleString()} TZS</td>
-            <td>${m.jamii_expected.toLocaleString()} TZS</td>
-            <td class="${jamiiShortfallClass}">${m.jamii_shortfall.toLocaleString()} TZS</td>
-            <td>${m.total_contributions.toLocaleString()} TZS</td>
-            <td>${m.total_loans.toLocaleString()} TZS</td>
-            <td>${m.total_rejesho.toLocaleString()} TZS</td>
-            <td>${m.remaining_loans.toLocaleString()} TZS</td>
-            <td>${m.total_penalties.toLocaleString()} TZS</td>
-            <td class="table-warning fw-bold">${m.net_contribution_position.toLocaleString()} TZS</td> 
-            <td class="table-info fw-bold">${m.expected_profit_share.toLocaleString()} TZS</td>
-            <td class="text-success fw-bold">${profitPercent}%</td>
-            <td class="table-success fw-bold">${m.net_payout.toLocaleString()} TZS</td>
-        </tr>`;
+        <td class="fw-bold">${m.member_name}</td>
+        <td class="text-end">${m.hisa_units.toFixed(2)}</td>
+        <td class="text-end">${(m.contributions['hisa anzia'] || 0).toLocaleString()} TZS</td>
+        <td class="text-end">${(m.contributions['hisa'] || 0).toLocaleString()} TZS</td>
+        <td class="text-end">${(m.contributions['jamii'] || 0).toLocaleString()} TZS</td>
+        <td class="text-end fw-bold">${m.total_savings.toLocaleString()} TZS</td>
+        <td class="text-end">${m.total_loans.toLocaleString()} TZS</td>
+        <td class="text-end">${m.total_rejesho.toLocaleString()} TZS</td>
+        <td class="text-end text-danger">${m.remaining_loans.toLocaleString()} TZS</td>
+        <td class="text-end">${m.total_penalties.toLocaleString()} TZS</td>
+        <td class="text-end table-warning fw-bold">${m.net_contribution_position.toLocaleString()} TZS</td> 
+        <td class="text-end table-info fw-bold">${m.expected_profit_share.toLocaleString()} TZS</td>
+        <td class="text-end text-success fw-bold">${profitPercent}%</td>
+        <td class="text-end table-success fw-bold">${m.net_payout.toLocaleString()} TZS</td>
+    </tr>`;
 
         totalContributions += m.total_contributions;
         totalLoans += m.total_loans;

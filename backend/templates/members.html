@@ -81,11 +81,9 @@
                 <tr>
                     <th>Member</th>
                     <th>Phone</th>
-                    <th class="text-end">Contributions</th>
+                    <th class="text-end">Total Contributions</th>
+                    <th class="text-end">HISA Units</th>
                     <th class="text-end">Loans Taken</th>
-                    <th class="text-end text-warning">Jamii Expected</th>
-                    <th class="text-end text-success">Jamii Paid</th>
-                    <th class="text-end text-danger">Jamii Shortfall</th>
                     <th class="text-end text-danger">Loans Due</th>
                     <th class="text-end">Penalties</th>
                     <th class="text-center">Status</th>
@@ -98,6 +96,11 @@
     <div id="noMembersFound" class="alert alert-info text-center d-none m-3">
         No members match your search.
     </div>
+</div>
+
+<div class="alert alert-info mt-4">
+    <strong>ℹ️ Note:</strong> Total Contributions includes Hisa Anzia, Hisa, Jamii and Penalties paid. 
+    Jamii is no longer mandatory and will be returned to members at cycle end along with their Hisa contributions.
 </div>
 
 <script>
@@ -120,7 +123,7 @@ function renderMembers(list) {
     empty.classList.add("d-none");
 
     list.forEach(m => {
-        const hasDebt = m.total_outstanding > 0 || m.total_penalties > 0 || m.jamii_shortfall > 0;
+        const hasDebt = m.total_outstanding > 0 || m.total_penalties > 0;
         const status = hasDebt
             ? `<span class="badge bg-danger">Outstanding</span>`
             : `<span class="badge bg-success">Cleared</span>`;
@@ -130,10 +133,8 @@ function renderMembers(list) {
                 <td class="fw-bold">${m.name}</td>
                 <td>${m.phone || "—"}</td>
                 <td class="text-end">${money(m.total_contributions)}</td>
+                <td class="text-end">${m.hisa_units.toFixed(2)} units</td>
                 <td class="text-end">${money(m.total_loans_committed)}</td>
-                <td class="text-end text-warning">${money(m.jamii_expected)}</td>
-                <td class="text-end text-success">${money(m.jamii_paid)}</td>
-                <td class="text-end text-danger">${money(m.jamii_shortfall)}</td>
                 <td class="text-end text-danger">${money(m.total_outstanding)}</td>
                 <td class="text-end">${money(m.total_penalties)}</td>
                 <td class="text-center">${status}</td>

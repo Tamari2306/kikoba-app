@@ -1,175 +1,297 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="container-fluid py-4">
-  <h2 class="mb-3 text-success">Loans</h2>
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="fw-bold"><i class="fas fa-money-bill-wave me-2 text-warning"></i>Loans</h1>
+    <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addLoanModal">
+        <i class="fas fa-plus me-1"></i> Add Loan
+    </button>
+</div>
 
-  <!-- Add Loan form -->
-  <div class="card shadow-sm mb-4 p-4">
-    <h5 class="mb-2 text-success">Give New Loan</h5>
-    <form id="add-loan-form" class="row g-3 align-items-center">
-      <div class="col-md-5">
-        <select id="loan-member-id" class="form-select" required>
-          <option value="">Select Member</option>
-        </select>
-      </div>
-      <div class="col-md-5">
-        <input type="number" id="loan-principal" class="form-control" placeholder="Principal Amount (TZS)" required>
-      </div>
-      <div class="col-md-2">
-        <button class="btn btn-success w-100" type="submit"><i class="bi bi-plus-circle"></i> Add Loan</button>
-      </div>
-    </form>
-  </div>
-
-  <!-- Loans table -->
-  <div class="card shadow-sm p-3">
-    <div class="table-responsive">
-      <table class="table table-hover align-middle" id="loans-table">
-        <thead class="table-success">
-          <tr>
-            <th>Member</th>
-            <th>Principal</th>
-            <th>Interest</th>
-            <th>Total</th>
-            <th>Start</th>
-            <th>Due</th>
-            <th>Returned</th>
-            <th>Remaining</th>
-            <th>Status</th>
-            <th>Penalty</th>
-            <th>Rejesho</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
+<!-- Add Loan Modal -->
+<div class="modal fade" id="addLoanModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title">Add New Loan</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning">
+                    <strong>⚠️ New Loan System:</strong><br>
+                    • Interest is deducted immediately<br>
+                    • Member receives: <strong>Principal - Interest</strong><br>
+                    • Member owes: <strong>Principal only</strong><br>
+                    • Monthly rejesho automatically calculated
+                </div>
+                <form id="add-loan-form">
+                    <div class="mb-3">
+                        <label class="form-label">Member</label>
+                        <select class="form-control" id="loanMember" required></select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Principal Amount (TZS)</label>
+                        <input type="number" class="form-control" id="loanPrincipal" required>
+                        <small class="text-muted">Amount member requested</small>
+                    </div>
+                    <div id="loanPreview" class="alert alert-info d-none mt-3">
+                        <h6>Loan Preview:</h6>
+                        <p class="mb-1"><strong>Principal:</strong> <span id="previewPrincipal">0</span> TZS</p>
+                        <p class="mb-1"><strong>Interest (deducted):</strong> <span id="previewInterest">0</span> TZS</p>
+                        <p class="mb-1"><strong>Net Amount (member receives):</strong> <span id="previewNetAmount" class="text-success">0</span> TZS</p>
+                        <p class="mb-1"><strong>Duration:</strong> <span id="previewMonths">0</span> months</p>
+                        <p class="mb-1"><strong>Monthly Rejesho:</strong> <span id="previewMonthlyRejesho">0</span> TZS</p>
+                        <p class="mb-0"><strong>Due Date:</strong> <span id="previewDueDate">-</span></p>
+                    </div>
+                    <button type="submit" class="btn btn-success w-100">
+                        <i class="fas fa-check me-1"></i> Approve Loan
+                    </button>
+                </form>
+            </div>
+        </div>
     </div>
-  </div>
+</div>
+
+<!-- Edit Loan Modal -->
+<div class="modal fade" id="editLoanModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title">Edit Loan (Date/Status Only)</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-warning">
+                    <strong>⚠️ Limited Editing:</strong> You can only change the due date and status. 
+                    Principal and interest cannot be modified after loan creation.
+                </div>
+                <form id="edit-loan-form">
+                    <input type="hidden" id="editLoanId">
+                    <div class="mb-3">
+                        <label class="form-label">Due Date</label>
+                        <input type="date" class="form-control" id="editLoanDueDate" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Status</label>
+                        <select class="form-control" id="editLoanStatus" required>
+                            <option value="Active">Active</option>
+                            <option value="Overdue">Overdue</option>
+                            <option value="Cleared">Cleared</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-warning w-100"><i class="fas fa-save me-1"></i> Update</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Loans Table -->
+<!-- Loans Table -->
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table table-hover mb-0">
+            <thead class="table-warning">
+                <tr>
+                    <th>Member</th>
+                    <th class="text-end">Principal</th>
+                    <th class="text-end">Interest (Deducted)</th>
+                    <th class="text-end">Net Received</th>
+                    <th class="text-end">Duration</th>
+                    <th class="text-end">Monthly Rejesho</th>
+                    <th class="text-end">Amount Owed</th>
+                    <th class="text-end">Returned</th>
+                    <th class="text-end">Remaining</th>
+                    <th>Start Date</th>
+                    <th>Due Date</th>
+                    <th>Status</th>
+                    <th class="text-center">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="loansTableBody"></tbody>
+        </table>
+    </div>
 </div>
 
 <script>
-const API_MEMBERS = "/api/members";
-const API_LOANS = "/api/loans";
-const API_REJESHO = "/api/rejesho"; // POST to add repayment
+const API = "/api/loans";
+const MEMBERS_API = "/api/members";
+let currentSettings = {};
 
-// load members into select
-async function loadMembersDropdown() {
-  const res = await fetch(API_MEMBERS);
-  if (!res.ok) return;
-  const members = await res.json();
-  const sel = document.getElementById("loan-member-id");
-  sel.innerHTML = '<option value="">Select Member</option>';
-  members.forEach(m => sel.innerHTML += `<option value="${m.id}">${m.name}</option>`);
+async function loadSettings() {
+    const res = await fetch("/api/settings");
+    currentSettings = await res.json();
 }
 
-// render loans table
+async function loadMembers() {
+    const res = await fetch(MEMBERS_API);
+    const members = await res.json();
+    const select = document.getElementById("loanMember");
+    select.innerHTML = members.map(m => `<option value="${m.id}">${m.name}</option>`).join("");
+}
+
 async function loadLoans() {
-  const res = await fetch(API_LOANS);
-  if (!res.ok) return;
-  const loans = await res.json();
-  const tbody = document.querySelector("#loans-table tbody");
-  tbody.innerHTML = "";
+    const res = await fetch(API);
+    const loans = await res.json();
+    const tbody = document.getElementById("loansTableBody");
 
-  loans.forEach(l => {
-    // status badge
-    const st = (String(l.status || "").toLowerCase());
-    const statusBadge = st === "cleared"
-      ? `<span class="badge bg-secondary">Cleared</span>`
-      : st === "overdue"
-        ? `<span class="badge bg-danger">Overdue</span>`
-        : `<span class="badge bg-success">Active</span>`;
+    tbody.innerHTML = loans.map(loan => {
+        const statusClass = {
+            'Active': 'success',
+            'Overdue': 'danger',
+            'Cleared': 'secondary'
+        }[loan.status] || 'secondary';
 
-    // make sure numeric fields exist
-    const principal = Number(l.principal || 0);
-    const interest = Number(l.interest || 0);
-    const total = Number(l.total || 0);
-    const returned = Number(l.amount_returned || 0);
-    const remaining = Number(l.remaining || 0);
-    const penalty = Number(l.penalty || 0);
+        return `
+            <tr>
+                <td class="fw-bold">${loan.member_name}</td>
+                <td class="text-end">${loan.principal.toLocaleString()} TZS</td>
+                <td class="text-end text-danger">${loan.interest.toLocaleString()} TZS</td>
+                <td class="text-end text-success"><strong>${loan.net_amount.toLocaleString()} TZS</strong></td>
+                <td class="text-end">${loan.months} months</td>
+                <td class="text-end text-info"><strong>${loan.monthly_rejesho.toLocaleString()} TZS</strong></td>
+                <td class="text-end">${loan.principal.toLocaleString()} TZS</td>
+                <td class="text-end">${loan.amount_returned.toLocaleString()} TZS</td>
+                <td class="text-end ${loan.remaining > 0 ? 'text-danger' : 'text-success'}">
+                    <strong>${loan.remaining.toLocaleString()} TZS</strong>
+                </td>
+                <td>${loan.start_date}</td>
+                <td>${loan.due_date}</td>
+                <td><span class="badge bg-${statusClass}">${loan.status}</span></td>
+                <td class="text-center">
+                    <button class="btn btn-sm btn-outline-info" onclick="window.location.href='/repayments-page?loan_id=${loan.loan_id}'">
+                        <i class="fas fa-eye"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-warning edit-btn" 
+                            data-id="${loan.loan_id}" 
+                            data-due-date="${loan.due_date}"
+                            data-status="${loan.status}">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                </td>
+            </tr>
+        `;
+    }).join("");
 
-    tbody.insertAdjacentHTML("beforeend", `
-      <tr data-loan-id="${l.loan_id}">
-        <td>${escapeHtml(l.member_name)}</td>
-        <td>${principal.toLocaleString()} TZS</td>
-        <td>${interest.toLocaleString()} TZS</td>
-        <td>${total.toLocaleString()} TZS</td>
-        <td>${l.start_date}</td>
-        <td>${l.due_date}</td>
-        <td>${returned.toLocaleString()} TZS</td>
-        <td>${remaining.toLocaleString()} TZS</td>
-        <td>${statusBadge}</td>
-        <td>${penalty.toLocaleString()} TZS</td>
-        <td style="min-width:210px">
-          <div class="d-flex">
-            <input type="number" class="form-control form-control-sm rejesho-amount" placeholder="Amount">
-            <button class="btn btn-success btn-sm ms-2 add-rejesho-btn">Add</button>
-            <button class="btn btn-outline-secondary btn-sm ms-2 view-rejesho-btn">View</button>
-          </div>
-        </td>
-      </tr>
-    `);
-  });
+    document.querySelectorAll('.edit-btn').forEach(btn => {
+        btn.addEventListener('click', handleEdit);
+    });
 }
 
-// helper: avoid XSS
-function escapeHtml(s){ return (s===null||s===undefined) ? '' : String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c]); }
+function handleEdit(e) {
+    const btn = e.currentTarget;
+    document.getElementById('editLoanId').value = btn.dataset.id;
+    document.getElementById('editLoanDueDate').value = btn.dataset.dueDate;
+    document.getElementById('editLoanStatus').value = btn.dataset.status;
+    new bootstrap.Modal(document.getElementById('editLoanModal')).show();
+}
 
-// add loan
-document.getElementById("add-loan-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const member_id = document.getElementById("loan-member-id").value;
-  const principal = document.getElementById("loan-principal").value;
-  if(!member_id || !principal) return alert("Select member and enter principal.");
-
-  const res = await fetch(API_LOANS, {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({member_id, principal})
-  });
-  const data = await res.json();
-  if(res.ok && data.status === "success"){
-    document.getElementById("loan-principal").value = "";
-    await loadLoans();
-  } else {
-    alert(data.error || "Failed to add loan");
-  }
-});
-
-// delegate clicks for adding rejesho and viewing repayments
-document.querySelector("#loans-table tbody").addEventListener("click", async (e) => {
-  const row = e.target.closest("tr");
-  if(!row) return;
-  const loanId = row.dataset.loanId;
-
-  // add rejesho
-  if(e.target.classList.contains("add-rejesho-btn")){
-    const amtInput = row.querySelector(".rejesho-amount");
-    const amount = Number(amtInput.value || 0);
-    if(!amount || amount <= 0) return alert("Enter valid amount");
-    const res = await fetch(API_REJESHO, {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({loan_id: loanId, amount})
-    });
-    const data = await res.json();
-    if(res.ok && data.status === "success"){
-      amtInput.value = "";
-      await loadLoans();
-    } else {
-      alert(data.error || "Failed to add repayment");
+// Live loan preview
+document.getElementById('loanPrincipal').addEventListener('input', async function() {
+    const principal = parseFloat(this.value) || 0;
+    
+    if (principal <= 0) {
+        document.getElementById('loanPreview').classList.add('d-none');
+        return;
     }
-  }
 
-  // view rejesho -> open repayments page for that loan (new page)
-  if(e.target.classList.contains("view-rejesho-btn")){
-    // navigate to repayments page with loan id param
-    window.location.href = `/repayments-page?loan_id=${loanId}`;
-  }
+    const interestRate = parseFloat(currentSettings.interest_rate) || 0.10;
+    const interest = Math.round(principal * interestRate);
+    const netAmount = principal - interest;
+
+    // Determine months based on loan tiers
+    const tiers = [
+        { max: parseFloat(currentSettings.loan_tier1_amount), months: parseInt(currentSettings.loan_tier1_months) },
+        { max: parseFloat(currentSettings.loan_tier2_amount), months: parseInt(currentSettings.loan_tier2_months) },
+        { max: parseFloat(currentSettings.loan_tier3_amount), months: parseInt(currentSettings.loan_tier3_months) },
+        { max: parseFloat(currentSettings.loan_tier4_amount), months: parseInt(currentSettings.loan_tier4_months) }
+    ];
+
+    let months = 1;
+    for (const tier of tiers) {
+        if (principal <= tier.max) {
+            months = tier.months;
+            break;
+        }
+    }
+
+    const monthlyRejesho = Math.round(principal / months);
+    const today = new Date();
+    const dueDate = new Date(today);
+    dueDate.setMonth(dueDate.getMonth() + months);
+
+    document.getElementById('previewPrincipal').textContent = principal.toLocaleString();
+    document.getElementById('previewInterest').textContent = interest.toLocaleString();
+    document.getElementById('previewNetAmount').textContent = netAmount.toLocaleString();
+    document.getElementById('previewMonths').textContent = months;
+    document.getElementById('previewMonthlyRejesho').textContent = monthlyRejesho.toLocaleString();
+    document.getElementById('previewDueDate').textContent = dueDate.toISOString().split('T')[0];
+
+    document.getElementById('loanPreview').classList.remove('d-none');
 });
 
-// initial
-loadMembersDropdown();
-loadLoans();
+document.getElementById("add-loan-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const member_id = loanMember.value;
+    const principal = loanPrincipal.value;
+
+    const res = await fetch(API, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ member_id, principal })
+    });
+
+    const data = await res.json();
+
+    if (res.ok) {
+        let message = `✅ Loan approved!\n\nMember receives: ${data.net_amount.toLocaleString()} TZS\nMonthly rejesho: ${data.monthly_rejesho.toLocaleString()} TZS`;
+        
+        if (data.warning) {
+            message += `\n\n⚠️ ${data.warning}`;
+        }
+        
+        alert(message);
+        bootstrap.Modal.getInstance(addLoanModal).hide();
+        e.target.reset();
+        document.getElementById('loanPreview').classList.add('d-none');
+        loadLoans();
+    } else {
+        alert(data.error || "Failed to add loan");
+    }
+});
+
+document.getElementById("edit-loan-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const id = document.getElementById('editLoanId').value;
+    const due_date = document.getElementById('editLoanDueDate').value;
+    const status = document.getElementById('editLoanStatus').value;
+
+    try {
+        const res = await fetch(`${API}/${id}`, {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ due_date, status })
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+            alert(data.message || 'Loan updated');
+            bootstrap.Modal.getInstance(document.getElementById('editLoanModal')).hide();
+            loadLoans();
+        } else {
+            alert(data.error || 'Failed to update');
+        }
+    } catch (error) {
+        alert('Network error');
+        console.error(error);
+    }
+});
+
+document.addEventListener("DOMContentLoaded", async () => {
+    await loadSettings();
+    await loadMembers();
+    loadLoans();
+});
 </script>
 
 {% endblock %}

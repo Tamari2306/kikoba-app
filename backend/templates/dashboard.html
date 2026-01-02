@@ -11,7 +11,6 @@
     </small>
 </div>
 
-
     <div class="d-flex gap-2">
         <button class="btn btn-success btn-lg rounded-pill shadow-sm d-flex align-items-center gap-2" 
                 data-bs-toggle="modal" data-bs-target="#configModal"
@@ -25,7 +24,6 @@
         </button>
     </div>
 </div>
-
 
 <div class="modal fade" id="configModal" tabindex="-1">
   <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
@@ -54,6 +52,7 @@
             <div class="col-md-6">
               <label class="form-label">Daily Penalty Amount (TZS)</label>
               <input type="number" class="form-control" name="daily_penalty_amount" id="daily_penalty_amount">
+              <small class="text-muted">Per day per overdue monthly rejesho</small>
             </div>
 
             <div class="col-md-6">
@@ -86,33 +85,6 @@
 
           <hr>
 
-          <!-- Jamii Configuration -->
-          <h6 class="fw-bold text-primary mb-3">💰 Jamii (Social Fund) Configuration</h6>
-          <div class="row g-3 mb-3">
-            <div class="col-md-6">
-              <label class="form-label">Jamii Contribution Amount (TZS)</label>
-              <input type="number" class="form-control" name="jamii_amount" id="jamii_amount" min="0" step="1000" required>
-              <small class="text-muted">Amount each member contributes per period</small>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label">Contribution Frequency</label>
-              <select class="form-control" name="jamii_frequency" id="jamii_frequency" required>
-                <option value="weekly">Weekly</option>
-                <option value="monthly">Monthly</option>
-                <option value="one-time">One-time (entire cycle)</option>
-              </select>
-              <small class="text-muted">How often members contribute</small>
-            </div>
-          </div>
-
-          <div class="alert alert-success mb-4" id="jamii_calculation_display">
-            <h6 class="mb-2">📊 Expected Jamii Contribution Per Member:</h6>
-            <p class="mb-0"><strong><span id="expected_jamii_per_member">0</span> TZS</strong> over the entire cycle</p>
-            <small class="text-muted">Based on <span id="periods_count">0</span> <span id="period_type">periods</span></small>
-          </div>
-
-          <hr>
-
           <!-- HISA Unit System -->
           <h6 class="fw-bold text-info mb-3">💎 HISA Unit System</h6>
           <div class="row g-3 mb-3">
@@ -121,7 +93,7 @@
                   <input type="number" class="form-control" name="hisa_unit_price" id="hisa_unit_price" 
                          min="1000" step="1000" required>
                   <small class="text-muted">
-                      Fixed price per HISA unit (e.g., 5,000 TZS). Members buy units instead of contributing random amounts.
+                      Fixed price per HISA unit (e.g., 5,000 TZS). Members buy units with both Hisa and Jamii contributions.
                   </small>
               </div>
           </div>
@@ -129,15 +101,23 @@
           <div class="alert alert-info mb-4">
               <strong>📊 How HISA Units Work:</strong><br>
               • Members contribute in multiples of the unit price<br>
+              • <strong>Both Hisa AND Jamii contributions count toward units</strong><br>
               • Example: Unit price = 5,000 TZS → Member contributes 50,000 TZS = <strong>10 units</strong><br>
               • Profit distribution: Each unit gets equal share of profits<br>
-              • <strong>Zero rounding errors!</strong> Total distributed always equals exact profit
+              • At cycle end: Members get back their contributions (Hisa + Jamii) + profit share
           </div>
 
           <hr>
 
           <!-- Loan Rules -->
           <h6 class="fw-bold text-warning mb-3">🏦 Loan Rules</h6>
+          <div class="alert alert-warning mb-3">
+              <strong>⚠️ New Loan System:</strong><br>
+              • Interest is deducted immediately (member receives principal - interest)<br>
+              • Monthly rejesho = principal / months<br>
+              • Penalties: 1000 TZS/day per overdue monthly payment
+          </div>
+          
           <div class="row g-3 mb-4">
             <div class="col-md-6">
                 <label class="form-label">Tier 1: Max Amount (TZS)</label>
@@ -217,14 +197,14 @@
   </div>
 </div>
 
+<!-- Summary Cards -->
 <div class="row g-3 mb-4">
-
     <div class="col-lg-4 col-md-6">
         <div class="card shadow-sm h-100 border-success">
             <div class="card-body">
                 <h6 class="text-muted">Net Profit Available</h6>
                 <h3 id="net-profit-in-hand" class="fw-bold text-success">0 TZS</h3>
-                <small class="text-muted">For distribution (Interest + Penalties - Expenses)</small>
+                <small class="text-muted">For distribution (Interest + Penalties - Leadership Pay)</small>
             </div>
         </div>
     </div>
@@ -232,9 +212,9 @@
     <div class="col-lg-4 col-md-6">
         <div class="card shadow-sm h-100 border-primary">
             <div class="card-body">
-                <h6 class="text-muted">Total Contributions (Hisa)</h6>
+                <h6 class="text-muted">Total Contributions (Anzia + Hisa + Jamii)</h6>
                 <h3 id="total-contributions-hisa" class="fw-bold text-primary">0 TZS</h3>
-                <small class="text-muted">Money contributed by members</small>
+                <small class="text-muted">Money to be returned to members at cycle end</small>
             </div>
         </div>
     </div>
@@ -248,11 +228,10 @@
             </div>
         </div>
     </div>
-
 </div>
 
+<!-- Detailed Metrics -->
 <div class="row g-3 mb-4">
-
     <div class="col-lg-3 col-md-6">
         <div class="card shadow-sm h-100 border-info">
             <div class="card-body">
@@ -289,37 +268,16 @@
             </div>
         </div>
     </div>
-
 </div>
 
+<!-- Additional Info -->
 <div class="row g-3 mb-4">
-
     <div class="col-lg-4 col-md-6">
         <div class="card shadow-sm h-100">
             <div class="card-body">
-                <h6 class="text-muted">Jamii Fund Expected</h6>
-                <h4 id="total-jamii-expected" class="fw-bold text-primary">0 TZS</h4>
-                <div class="small text-muted">Total mandatory fees due (Liability)</div>
-            </div>
-        </div>
-    </div>
-
-    <div class="col-lg-4 col-md-6">
-        <div class="card shadow-sm h-100">
-            <div class="card-body">
-                <h6 class="text-muted">Jamii Fund Used (Expenses)</h6>
-                <h4 id="jamii-fund-used" class="fw-bold text-danger">0 TZS</h4>
-                <div class="small text-muted">Unused Balance: <span id="unused-jamii-for-refund" class="fw-bold">0 TZS</span></div>
-            </div>
-        </div>
-    </div>
-
-    <div class="col-lg-4 col-md-6">
-        <div class="card shadow-sm h-100 border-warning">
-            <div class="card-body">
-                <h6 class="text-muted">Jamii Contribution Shortfall</h6>
-                <h3 id="jamii-shortfall" class="fw-bold text-warning">0 TZS</h3>
-                <div class="small text-muted">Amount members owe for Jamii</div>
+                <h6 class="text-muted">Total Jamii Collected</h6>
+                <h4 id="total-jamii-collected" class="fw-bold text-info">0 TZS</h4>
+                <div class="small text-muted">To be returned to members at cycle end</div>
             </div>
         </div>
     </div>
@@ -341,9 +299,9 @@
             </div>
         </div>
     </div>
-
 </div>
 
+<!-- Charts -->
 <div class="row g-4">
     <div class="col-lg-6">
         <div class="card shadow-sm">
@@ -372,15 +330,6 @@ function formatTZS(v) {
     return Number(v || 0).toLocaleString() + " TZS";
 }
 
-function formatDateForExcel(isoDateStr) {
-    const d = new Date(isoDateStr);
-    if (isNaN(d)) return "";
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd}`;
-}
-
 /* ================= CYCLE CALCULATIONS ================= */
 function updateCycleDuration() {
     const start = document.getElementById('cycle_start_date').value;
@@ -396,47 +345,7 @@ function updateCycleDuration() {
         
         document.getElementById('duration_text').textContent = 
             `${diffDays} days (≈${diffWeeks} weeks or ≈${diffMonths} months)`;
-        
-        updateJamiiCalculation();
     }
-}
-
-function updateJamiiCalculation() {
-    const start = document.getElementById('cycle_start_date').value;
-    const end = document.getElementById('cycle_end_date').value;
-    const amount = parseFloat(document.getElementById('jamii_amount').value) || 0;
-    const frequency = document.getElementById('jamii_frequency').value;
-    
-    if (!start || !end || amount === 0) {
-        document.getElementById('expected_jamii_per_member').textContent = '0';
-        document.getElementById('periods_count').textContent = '0';
-        return;
-    }
-    
-    const startDate = new Date(start);
-    const endDate = new Date(end);
-    const diffTime = Math.abs(endDate - startDate);
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
-    let periods, periodType;
-    
-    if (frequency === 'weekly') {
-        periods = Math.floor(diffDays / 7);
-        periodType = 'weeks';
-    } else if (frequency === 'monthly') {
-        periods = Math.floor(diffDays / 30);
-        periodType = 'months';
-    } else { // one-time
-        periods = 1;
-        periodType = 'payment';
-    }
-    
-    const expectedTotal = amount * periods;
-    
-    document.getElementById('expected_jamii_per_member').textContent = 
-        expectedTotal.toLocaleString();
-    document.getElementById('periods_count').textContent = periods;
-    document.getElementById('period_type').textContent = periodType;
 }
 
 /* ================= DASHBOARD DATA LOADING ================= */
@@ -447,34 +356,24 @@ async function loadDashboard() {
 
         document.getElementById("group-name-header").innerText = d.group_name + " Dashboard";
 
-        // ================= SUMMARY CARDS =================
+        // Summary cards
         document.getElementById("net-profit-in-hand").innerText = formatTZS(d.net_profit_in_hand);
         document.getElementById("total-contributions-hisa").innerText = formatTZS(d.total_contributions_hisa);
         document.getElementById("loan-balance-due").innerText = formatTZS(d.loan_balance_due);
 
-        // ================= HISA UNITS =================
+        // HISA units (now includes Jamii)
         document.getElementById("total-hisa-units").innerText = 
             (d.total_hisa_units || 0).toFixed(2) + " units";
 
-        // ================= FINANCIAL METRICS =================
+        // Financial metrics
         document.getElementById("total-principal-loaned").innerText = formatTZS(d.total_principal_loaned);
         document.getElementById("total-interests").innerText = formatTZS(d.total_interests);
-        
         document.getElementById("penalties-imposed").innerText = formatTZS(d.penalties_imposed);
-
         document.getElementById("leadership-pay-amount-display").innerText = formatTZS(d.leadership_pay_amount);
         document.getElementById("total-members").innerText = d.total_members;
 
-        // ================= JAMII DISPLAY =================
-        const expected = d.expected_jamii_total || 0; 
-        const used = d.jamii_fund_used || 0;
-        const unused = d.unused_jamii_for_refund || 0; 
-        const shortfall = d.total_jamii_shortfall || 0;
-
-        document.getElementById("total-jamii-expected").innerText = formatTZS(expected);
-        document.getElementById("jamii-fund-used").innerText = formatTZS(used);
-        document.getElementById("unused-jamii-for-refund").innerText = formatTZS(unused);
-        document.getElementById("jamii-shortfall").innerText = formatTZS(shortfall);
+        // Jamii (now just for display, returned to members)
+        document.getElementById("total-jamii-collected").innerText = formatTZS(d.total_jamii_collected);
 
         loadCurrentSettings(d);
         drawCharts(d);
@@ -487,18 +386,9 @@ async function loadDashboard() {
 function loadCurrentSettings(d) {
     document.getElementById("group_name").value = d.group_name || '';
     document.getElementById("interest_rate").value = parseFloat(d.interest_rate) * 100 || 0; 
-    
-    // Cycle dates
     document.getElementById("cycle_start_date").value = d.cycle_start_date || '';
     document.getElementById("cycle_end_date").value = d.cycle_end_date || '';
-    
-    // Jamii settings
-    document.getElementById("jamii_amount").value = d.jamii_amount || 2000;
-    document.getElementById("jamii_frequency").value = d.jamii_frequency || 'monthly';
-    
-    // HISA unit price
     document.getElementById("hisa_unit_price").value = d.hisa_unit_price || 5000;
-    
     document.getElementById("daily_penalty_amount").value = d.daily_penalty || 0;
     document.getElementById("leadership_pay_amount").value = d.leadership_pay_amount || 0;
 
@@ -512,7 +402,6 @@ function loadCurrentSettings(d) {
     document.getElementById("loan_tier4_amount").value = d.loan_tier4_amount || 5000000;
     document.getElementById("loan_tier4_months").value = d.loan_tier4_months || 9;
 
-    // Trigger cycle calculations
     updateCycleDuration();
 }
 
@@ -521,11 +410,8 @@ function initSettingsForm() {
     const form = document.getElementById("settingsForm");
     if (!form) return;
 
-    // Add event listeners for live calculations
     document.getElementById('cycle_start_date').addEventListener('change', updateCycleDuration);
     document.getElementById('cycle_end_date').addEventListener('change', updateCycleDuration);
-    document.getElementById('jamii_amount').addEventListener('input', updateJamiiCalculation);
-    document.getElementById('jamii_frequency').addEventListener('change', updateJamiiCalculation);
 
     form.addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -533,7 +419,6 @@ function initSettingsForm() {
         const formData = new FormData(form);
         const payload = Object.fromEntries(formData.entries());
 
-        // Validate cycle dates
         if (payload.cycle_start_date && payload.cycle_end_date) {
             if (new Date(payload.cycle_start_date) >= new Date(payload.cycle_end_date)) {
                 alert('End date must be after start date!');
@@ -541,7 +426,6 @@ function initSettingsForm() {
             }
         }
 
-        // Validate HISA unit price
         if (payload.hisa_unit_price) {
             const unitPrice = parseFloat(payload.hisa_unit_price);
             if (unitPrice < 1000) {
@@ -615,7 +499,6 @@ async function loadConstitutionStatus() {
         if (d.uploaded) {
             section.classList.remove("d-none");
             empty.classList.add("d-none");
-
             document.getElementById("view-constitution").href = d.view_url;
             document.getElementById("download-constitution").href = d.download_url;
         } else {
@@ -626,7 +509,6 @@ async function loadConstitutionStatus() {
         console.warn("No constitution yet");
     }
 }
-
 
 /* ================= CHARTS ================= */
 function drawCharts(d) {
@@ -647,33 +529,6 @@ function drawCharts(d) {
                     d.total_principal_loaned,
                     d.total_interests,
                     d.net_profit_in_hand
-                ],
-                backgroundColor: [
-                    'rgba(54, 162, 235, 0.5)',
-                    'rgba(255, 159, 64, 0.5)',
-                    'rgba(75, 192, 192, 0.5)',
-                    'rgba(153, 102, 255, 0.5)'
-                ],
-                borderColor: [
-                    'rgb(54, 162, 235)',
-                    'rgb(255, 159, 64)',
-                    'rgb(75, 192, 192)',
-                    'rgb(153, 102, 255)'
-                ],
-                borderWidth: 1
-            }]
-        },
-        options: { responsive: true, maintainAspectRatio: true }
-    });
-
-    loansChartCanvas.chart = new Chart(loansChartCanvas, {
-        type: "doughnut",
-        data: {
-            labels: ["Loans Repaid", "Loans Outstanding"],
-            datasets: [{
-                data: [
-                    Math.max(d.total_principal_loaned - d.loan_balance_due, 0),
-                    d.loan_balance_due
                 ],
                 backgroundColor: [
                     'rgba(54, 162, 235, 0.5)',
@@ -733,7 +588,6 @@ function initBackupButton() {
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement("a");
             
-            const contentDisposition = response.headers.get('Content-Disposition');
             let filename = `kikoba_backup_${new Date().toISOString().slice(0,10)}.zip`;
             
             a.href = url;

@@ -4,7 +4,7 @@
     
     <div id="loan-selection-area">
         <h2 class="mb-4 text-danger">⚠️ Error: Loan Not Selected</h2>
-        <p class="lead">Please navigate to the **Loans** page and click the "Repay" button next to the specific loan you wish to view or update.</p>
+        <p class="lead">Please navigate to the **Loans** page and click the "View" button next to the specific loan you wish to view or update.</p>
         <a href="/loans-page" class="btn btn-primary">Go to Loans Page</a>
     </div>
 
@@ -12,41 +12,78 @@
         <h2 class="mb-4">Loan Repayment History</h2>
         <h5 id="loan-details-header"></h5>
 
+        <div class="alert alert-info">
+            <strong>ℹ️ Note:</strong> Interest was deducted immediately when this loan was issued. 
+            The member received <strong id="net-amount-received"></strong> TZS but owes <strong id="principal-owed"></strong> TZS (principal only).
+        </div>
+
         <div class="row mb-4">
             <div class="col-md-6">
                 <div class="card shadow-sm p-3 bg-light">
-                    <h6>Loan Summary</h6>
-                    <p class="mb-1"><strong>Principal:</strong> <span id="summary-principal"></span> TZS</p>
-                    <p class="mb-1"><strong>Total Due:</strong> <span id="summary-total"></span> TZS</p>
-                    <p class="mb-1"><strong>Amount Paid:</strong> <span id="summary-paid" class="text-success"></span> TZS</p>
-                    <p class="mb-1"><strong>Remaining Balance:</strong> <span id="summary-remaining" class="fw-bold text-danger"></span> TZS</p>
-                    <p class="mb-0"><strong>Due Date:</strong> <span id="summary-due-date"></span></p>
+                    <h6 class="fw-bold mb-3">Loan Summary</h6>
+                    <div class="row mb-2">
+                        <div class="col-6"><strong>Principal (Owed):</strong></div>
+                        <div class="col-6 text-end"><span id="summary-principal"></span> TZS</div>
+                    </div>
+                    <div class="row mb-2">
+                        <div class="col-6"><strong>Interest (Deducted):</strong></div>
+                        <div class="col-6 text-end text-danger"><span id="summary-interest"></span> TZS</div>
+                    </div>
+                    <div class="row mb-2">
+                        <div class="col-6"><strong>Net Received:</strong></div>
+                        <div class="col-6 text-end text-success"><span id="summary-net"></span> TZS</div>
+                    </div>
+                    <hr>
+                    <div class="row mb-2">
+                        <div class="col-6"><strong>Duration:</strong></div>
+                        <div class="col-6 text-end"><span id="summary-months"></span> months</div>
+                    </div>
+                    <div class="row mb-2">
+                        <div class="col-6"><strong>Monthly Rejesho:</strong></div>
+                        <div class="col-6 text-end text-info"><span id="summary-monthly"></span> TZS</div>
+                    </div>
+                    <div class="row mb-2">
+                        <div class="col-6"><strong>Due Date:</strong></div>
+                        <div class="col-6 text-end"><span id="summary-due-date"></span></div>
+                    </div>
+                    <hr>
+                    <div class="row mb-2">
+                        <div class="col-6"><strong>Amount Paid:</strong></div>
+                        <div class="col-6 text-end text-success"><span id="summary-paid"></span> TZS</div>
+                    </div>
+                    <div class="row">
+                        <div class="col-6"><strong>Remaining Balance:</strong></div>
+                        <div class="col-6 text-end"><span id="summary-remaining" class="fw-bold text-danger"></span> TZS</div>
+                    </div>
                 </div>
             </div>
 
             <div class="col-md-6">
                 <div class="card shadow-sm p-3">
-                    <h6>Record New Repayment</h6>
-                    <div class="input-group mb-3">
-                        <input type="number" id="repayment-amount" class="form-control" placeholder="Enter Amount (TZS)" min="1" required>
-                        <button class="btn btn-success" id="record-repayment-btn">Record Payment</button>
+                    <h6 class="fw-bold mb-3">Record New Repayment</h6>
+                    <div class="mb-3">
+                        <label class="form-label">Amount (TZS)</label>
+                        <input type="number" id="repayment-amount" class="form-control" placeholder="Enter Amount" min="1" required>
+                        <small class="text-muted">Suggested monthly: <span id="suggested-amount">0</span> TZS</small>
                     </div>
+                    <button class="btn btn-success w-100" id="record-repayment-btn">
+                        <i class="bi bi-check-circle me-2"></i>Record Payment
+                    </button>
                     <div id="repayment-status-message" class="mt-2"></div>
                 </div>
             </div>
         </div>
 
-        <h3>Repayment Transactions</h3>
+        <h3 class="mb-3">Repayment Transactions</h3>
         <div class="card shadow-sm p-3">
-            <table class="table table-hover align-middle">
-                <thead class="table-info">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-success">
                     <tr>
                         <th>Date</th>
-                        <th>Amount Paid (TZS)</th>
+                        <th class="text-end">Amount Paid (TZS)</th>
                     </tr>
                 </thead>
-                <tbody id="repayment-history-table">
-                    </tbody>
+                <tbody id="repayment-history-table"></tbody>
             </table>
         </div>
     </div>
@@ -54,7 +91,7 @@
 </div>
 
 <script>
-    const loanId = "{{ loan_id }}"; // This is how Flask passes the ID to the HTML
+    const loanId = "{{ loan_id }}";
 
     document.addEventListener('DOMContentLoaded', () => {
         if (loanId && loanId !== 'None') {
@@ -88,22 +125,39 @@
 
     function updateLoanSummary(loan, repayments) {
         const totalPaid = repayments.reduce((sum, r) => sum + r.amount, 0);
-        const remaining = loan.total - totalPaid;
+        
+        // FIX: Member owes principal only, remaining = principal - paid
+        const remaining = loan.principal - totalPaid;
 
         document.getElementById('loan-details-header').innerText = `Loan for ${loan.member_name} (ID: ${loan.id})`;
+        
+        // Display all loan details
         document.getElementById('summary-principal').innerText = loan.principal.toLocaleString();
-        document.getElementById('summary-total').innerText = loan.total.toLocaleString();
+        document.getElementById('summary-interest').innerText = loan.interest.toLocaleString();
+        document.getElementById('summary-net').innerText = loan.net_amount.toLocaleString();
+        document.getElementById('summary-months').innerText = loan.months;
+        document.getElementById('summary-monthly').innerText = loan.monthly_rejesho.toLocaleString();
+        document.getElementById('summary-due-date').innerText = loan.due_date;
         document.getElementById('summary-paid').innerText = totalPaid.toLocaleString();
         document.getElementById('summary-remaining').innerText = remaining.toLocaleString();
-        document.getElementById('summary-due-date').innerText = loan.due_date;
         
-        // Show status (optional)
+        // Update info note at top
+        document.getElementById('net-amount-received').innerText = loan.net_amount.toLocaleString();
+        document.getElementById('principal-owed').innerText = loan.principal.toLocaleString();
+        
+        // Update suggested amount
+        document.getElementById('suggested-amount').innerText = loan.monthly_rejesho.toLocaleString();
+        
+        // Show status
         const remainingElement = document.getElementById('summary-remaining');
         if (remaining <= 0) {
-             remainingElement.classList.replace('text-danger', 'text-success');
-             remainingElement.innerHTML += ' (CLEARED)';
+             remainingElement.classList.remove('text-danger');
+             remainingElement.classList.add('text-success');
+             remainingElement.parentElement.innerHTML += ' <span class="badge bg-success">CLEARED</span>';
              document.getElementById('record-repayment-btn').disabled = true;
         } else {
+             remainingElement.classList.remove('text-success');
+             remainingElement.classList.add('text-danger');
              document.getElementById('record-repayment-btn').disabled = false;
         }
     }
@@ -113,14 +167,14 @@
         tbody.innerHTML = '';
 
         if (repayments.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="2" class="text-center">No repayments recorded yet.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="2" class="text-center text-muted">No repayments recorded yet.</td></tr>';
             return;
         }
 
         repayments.forEach(r => {
             const row = `<tr>
                 <td>${r.date}</td>
-                <td>${r.amount.toLocaleString()}</td>
+                <td class="text-end fw-bold">${r.amount.toLocaleString()} TZS</td>
             </tr>`;
             tbody.innerHTML += row;
         });
@@ -132,24 +186,36 @@
         const statusMessage = document.getElementById('repayment-status-message');
 
         if (isNaN(amount) || amount <= 0) {
-            statusMessage.innerHTML = '<span class="text-danger">Please enter a valid amount.</span>';
+            statusMessage.innerHTML = '<div class="alert alert-danger">Please enter a valid amount.</div>';
             return;
         }
 
-        const res = await fetch("/api/rejesho", {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({ loan_id: loanId, amount: amount })
-        });
+        statusMessage.innerHTML = '<div class="alert alert-info">Processing payment...</div>';
 
-        const data = await res.json();
+        try {
+            const res = await fetch("/api/rejesho", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({ loan_id: loanId, amount: amount })
+            });
 
-        if (res.ok) {
-            statusMessage.innerHTML = `<span class="text-success">Payment of ${amount.toLocaleString()} TZS recorded successfully!</span>`;
-            amountInput.value = ''; // Clear input
-            loadRepaymentHistory(loanId); // Reload data to update table and summary
-        } else {
-            statusMessage.innerHTML = `<span class="text-danger">Error: ${data.error || 'Failed to record payment.'}</span>`;
+            const data = await res.json();
+
+            if (res.ok) {
+                statusMessage.innerHTML = `<div class="alert alert-success">✅ Payment of ${amount.toLocaleString()} TZS recorded successfully!</div>`;
+                amountInput.value = '';
+                
+                // Reload data after 1 second
+                setTimeout(() => {
+                    loadRepaymentHistory(loanId);
+                    statusMessage.innerHTML = '';
+                }, 1500);
+            } else {
+                statusMessage.innerHTML = `<div class="alert alert-danger">❌ Error: ${data.error || 'Failed to record payment.'}</div>`;
+            }
+        } catch (error) {
+            statusMessage.innerHTML = '<div class="alert alert-danger">❌ Network error occurred.</div>';
+            console.error(error);
         }
     }
 

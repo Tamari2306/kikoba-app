@@ -1,4 +1,3 @@
-import io
 import zipfile
 from flask import Flask, redirect, request, jsonify, render_template, send_file, send_from_directory, session
 from flask_cors import CORS
@@ -16,7 +15,6 @@ from werkzeug.utils import secure_filename
 import os
 import csv
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask import session
 
 
 app = Flask(__name__)
@@ -75,9 +73,10 @@ def create_new_group(db, group_name, admin_id):
         ('daily_penalty_amount', '1000'),
         ('leadership_pay_amount', '0'),
         ('jamii_amount', '2000'),
-        ('jamii_frequency', 'monthly'),  # weekly, monthly, or one-time
+        ('jamii_frequency', 'monthly'),
         ('cycle_start_date', ''),
-        ('cycle_end_date', '')
+        ('cycle_end_date', ''),
+        ('hisa_unit_price', '5000')
     ]
 
     for key, value in defaults:
@@ -107,12 +106,15 @@ def get_group_settings(db, group_id):
         'jamii_frequency': 'monthly',
         'cycle_start_date': '',
         'cycle_end_date': '',
+        'hisa_unit_price': '5000',
         'loan_tier1_amount': '500000',
         'loan_tier1_months': '1',
         'loan_tier2_amount': '1000000',
         'loan_tier2_months': '3',
         'loan_tier3_amount': '2000000',
-        'loan_tier3_months': '6'
+        'loan_tier3_months': '6',
+        'loan_tier4_amount': '5000000',
+        'loan_tier4_months': '9'
     }
     
     for key, default_value in defaults.items():
@@ -151,6 +153,47 @@ def calculate_cycle_months(start_date_str, end_date_str):
         return max(0, months)
     except:
         return 0
+
+def get_member_hisa_units(db, member_id, group_id):
+    """Calculate member's HISA units based on contributions and unit price"""
+    settings = get_group_settings(db, group_id)
+    unit_price = float(settings.get('hisa_unit_price', 5000))
+    
+    # Only count 'hisa' contributions (not hisa anzia)
+    total_hisa = db.execute(
+        """
+        SELECT SUM(amount) 
+        FROM contributions 
+        WHERE member_id = ? AND group_id = ? AND type = 'hisa'
+        """,
+        (member_id, group_id)
+    ).fetchone()[0] or 0
+    
+    units = total_hisa / unit_price if unit_price > 0 else 0
+    
+    return {
+        "total_contributed": total_hisa,
+        "units": units,
+        "unit_price": unit_price
+    }
+
+def get_total_hisa_units(db, group_id):
+    """Get total HISA units in the group"""
+    settings = get_group_settings(db, group_id)
+    unit_price = float(settings.get('hisa_unit_price', 5000))
+    admin_id = get_group_admin_member_id(db, group_id)
+    
+    total_hisa = db.execute(
+        """
+        SELECT SUM(amount) 
+        FROM contributions 
+        WHERE group_id = ? AND type = 'hisa' AND member_id != ?
+        """,
+        (group_id, admin_id)
+    ).fetchone()[0] or 0
+    
+    units = total_hisa / unit_price if unit_price > 0 else 0
+    return units
 
 def get_member_jamii_balance(db, member_id, group_id):
     """Calculate member's Jamii contribution status for a specific group."""
@@ -504,7 +547,7 @@ def get_total_group_penalty_liability(db, group_id):
 def index():
     if "admin_id" in session:
         if "group_id" in session:
-            return redirect("/login")
+            return redirect("/dashboard")
         else:
             return redirect("/create-group")
     
@@ -572,16 +615,13 @@ def login():
         elif not check_password_hash(admin["password"], password):
             error = "Wrong password"
         else:
-            # ✅ LOGIN SUCCESS
             session.clear()
             session["admin_id"] = admin["id"]
 
-            # If admin already has a group → go dashboard
             if admin["group_id"]:
                 session["group_id"] = admin["group_id"]
                 return redirect("/dashboard")
 
-            # Otherwise → create group
             return redirect("/create-group")
 
     return render_template("login.html", error=error)
@@ -625,12 +665,8 @@ def create_group():
         if not group_name:
             error = "Group name is required"
         else:
-            # Create group and associate with admin
             group_id = create_new_group(db, group_name, session["admin_id"])
-
-            # Lock group in session
             session["group_id"] = group_id
-
             return redirect("/dashboard")
 
     return render_template("create_group.html", error=error)
@@ -675,13 +711,11 @@ def get_dashboard_data():
     settings = get_group_settings(db, group_id)
     admin_id = get_group_admin_member_id(db, group_id)
 
-    # Members (EXCLUDE system admin)
     total_members = db.execute(
         "SELECT COUNT(id) FROM members WHERE group_id = ? AND is_system = 0",
         (group_id,)
     ).fetchone()[0]
 
-    # Calculate total Jamii shortfall across all non-system members
     members = db.execute(
         "SELECT id FROM members WHERE group_id = ? AND is_system = 0",
         (group_id,)
@@ -692,13 +726,13 @@ def get_dashboard_data():
         for m in members
     )
     
-    # Get penalties data
     total_imposed = get_total_penalties_imposed(db, group_id) 
     total_paid = get_total_penalties_paid(db, group_id)
     total_due = get_total_group_penalty_liability(db, group_id)
 
+    total_units = get_total_hisa_units(db, group_id)
+
     return jsonify({
-        # Settings
         "group_name": settings.get('group_name', 'Kikoba App'),
         "constitution_path": settings.get('constitution_path', None),
         "interest_rate": settings.get('interest_rate', '0.10'),
@@ -708,31 +742,31 @@ def get_dashboard_data():
         "jamii_frequency": settings.get('jamii_frequency', 'monthly'),
         "cycle_start_date": settings.get('cycle_start_date', ''),
         "cycle_end_date": settings.get('cycle_end_date', ''),
-
-        # Members
+        "hisa_unit_price": settings.get('hisa_unit_price', '5000'),
         "total_members": total_members,
-
-        # Savings & Loans
         "total_contributions_hisa": get_total_savings(db, group_id),
+        "total_hisa_units": total_units,
         "loan_balance_due": get_total_outstanding_loans(db, group_id),
         "total_principal_loaned": get_total_principal_loaned(db, group_id),
-
-        # Profit Metrics (Interest + Penalties + Expected Jamii)
         "total_interests": profit_data["total_interest"],
         "gross_distributable_pool": profit_data["gross_distributable_pool"],
         "net_profit_in_hand": profit_data["net_profit_pool"],
-
-        # Penalties
         "penalties_imposed": total_imposed,
         "penalties_paid": total_paid,
         "penalties_due_net": total_due,
-
-        # Jamii Breakdown
         "expected_jamii_total": profit_data["expected_jamii_total"],
         "total_jamii_collected": profit_data["total_jamii_collected"],
         "jamii_fund_used": profit_data["historical_jamii_spent"],
         "unused_jamii_for_refund": profit_data["unused_jamii_balance"],
         "total_jamii_shortfall": total_jamii_shortfall,
+        "loan_tier1_amount": settings.get('loan_tier1_amount', '500000'),
+        "loan_tier1_months": settings.get('loan_tier1_months', '1'),
+        "loan_tier2_amount": settings.get('loan_tier2_amount', '1000000'),
+        "loan_tier2_months": settings.get('loan_tier2_months', '3'),
+        "loan_tier3_amount": settings.get('loan_tier3_amount', '2000000'),
+        "loan_tier3_months": settings.get('loan_tier3_months', '6'),
+        "loan_tier4_amount": settings.get('loan_tier4_amount', '5000000'),
+        "loan_tier4_months": settings.get('loan_tier4_months', '9'),
     })
 
 # ==================== CONFIGURATION ROUTES ====================
@@ -765,7 +799,6 @@ def save_loan_rules_api():
     if not rules or not isinstance(rules, list):
         return jsonify({"error": "Invalid rules data format"}), 400
     
-    # Delete only rules for this group
     db.execute("DELETE FROM loan_rules WHERE group_id = ?", (group_id,))
     
     for rule in rules:
@@ -812,6 +845,15 @@ def handle_settings():
         ('jamii_frequency', data.get('jamii_frequency')),
         ('cycle_start_date', data.get('cycle_start_date')),
         ('cycle_end_date', data.get('cycle_end_date')),
+        ('hisa_unit_price', data.get('hisa_unit_price')),
+        ('loan_tier1_amount', data.get('loan_tier1_amount')),
+        ('loan_tier1_months', data.get('loan_tier1_months')),
+        ('loan_tier2_amount', data.get('loan_tier2_amount')),
+        ('loan_tier2_months', data.get('loan_tier2_months')),
+        ('loan_tier3_amount', data.get('loan_tier3_amount')),
+        ('loan_tier3_months', data.get('loan_tier3_months')),
+        ('loan_tier4_amount', data.get('loan_tier4_amount')),
+        ('loan_tier4_months', data.get('loan_tier4_months')),
     ]
 
     try:
@@ -921,7 +963,6 @@ def constitution_status():
     if not row or not row['value']:
         return jsonify({"uploaded": False}), 200
     
-    # Check if file actually exists on disk
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], row['value'])
     if not os.path.exists(file_path):
         return jsonify({"uploaded": False}), 200
@@ -988,7 +1029,6 @@ def get_members():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    # Only get non-system members
     members = db.execute(
         "SELECT * FROM members WHERE group_id = ? AND is_system = 0", 
         (group_id,)
@@ -998,26 +1038,22 @@ def get_members():
     for m in members:
         member_id = m["id"]
         
-        # Total Contributions
         total_contributions = db.execute(
             "SELECT SUM(amount) FROM contributions WHERE member_id=? AND group_id=? AND type != 'jamii_deduction'",
             (member_id, group_id)
         ).fetchone()[0] or 0
 
-        # Fetch loan data using the function
         loan_balances = get_member_loan_balances(db, member_id, group_id)
-        
-        # Total Penalties
         total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
-        
-        # Jamii Balance
         jamii_status = get_member_jamii_balance(db, member_id, group_id)
+        hisa_data = get_member_hisa_units(db, member_id, group_id)
 
         result.append({
             "id": member_id,
             "name": m["name"],
             "phone": m["phone"],
             "total_contributions": total_contributions,
+            "hisa_units": hisa_data["units"],
             "total_loans_committed": loan_balances["total_loans_committed"],
             "total_penalties": total_penalties_due,
             "total_outstanding": loan_balances["remaining_loans"],
@@ -1059,7 +1095,6 @@ def edit_member(member_id):
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    # Verify member belongs to current group and is not system admin
     member = db.execute(
         "SELECT id, is_system FROM members WHERE id = ? AND group_id = ?",
         (member_id, group_id)
@@ -1072,7 +1107,6 @@ def edit_member(member_id):
         return jsonify({"error": "Cannot modify system admin account"}), 400
     
     if request.method == 'DELETE':
-        # Check if member has any records
         has_records = db.execute("""
             SELECT 
                 (SELECT COUNT(*) FROM contributions WHERE member_id = ? AND group_id = ?) +
@@ -1190,7 +1224,6 @@ def edit_contribution(contribution_id):
         return jsonify({"error": "No group selected"}), 400
     
     if request.method == 'DELETE':
-        # Safety check: Don't delete Jamii deductions (system records)
         contrib = db.execute(
             "SELECT type FROM contributions WHERE id = ? AND group_id = ?", 
             (contribution_id, group_id)
@@ -1225,7 +1258,6 @@ def edit_contribution(contribution_id):
         return jsonify({"error": "Invalid contribution type"}), 400
     
     try:
-        # Validate date format
         datetime.strptime(date_str, "%Y-%m-%d")
         
         db.execute(
@@ -1274,7 +1306,6 @@ def get_loans():
 
         remaining = l["total"] - repaid
 
-        # Determine current status
         today = datetime.now().date()
         due_date = datetime.strptime(l["due_date"], "%Y-%m-%d").date()
 
@@ -1298,7 +1329,6 @@ def get_loans():
             "status": status
         })
         
-        # Update database status if needed
         if l["status"] != status:
              db.execute("UPDATE loans SET status = ? WHERE id = ? AND group_id = ?", (status, l["id"], group_id))
              db.commit()
@@ -1322,7 +1352,6 @@ def add_loan():
         if not member_id or principal <= 0:
             return jsonify({"error": "Invalid member or principal amount"}), 400
 
-        # Verify member belongs to current group
         member = db.execute(
             "SELECT id FROM members WHERE id = ? AND group_id = ?",
             (member_id, group_id)
@@ -1331,13 +1360,10 @@ def add_loan():
         if not member:
             return jsonify({"error": "Member not found in this group"}), 400
 
-        # ================= SETTINGS =================
         settings = get_group_settings(db, group_id)
-
-        # Interest rate (stored as decimal e.g. 0.10)
         interest_rate = float(settings.get("interest_rate", 0.10))
+        cycle_end_date = settings.get('cycle_end_date', '')
 
-        # Loan rules (principal → months)
         rules = [
             (float(settings.get("loan_tier1_amount", 500000)),
              int(settings.get("loan_tier1_months", 1))),
@@ -1349,7 +1375,6 @@ def add_loan():
              int(settings.get("loan_tier4_months", 9))),
         ]
 
-        # ================= DETERMINE DURATION =================
         months = None
         for max_amount, duration in rules:
             if principal <= max_amount:
@@ -1361,15 +1386,38 @@ def add_loan():
                 "error": "Loan amount exceeds the maximum allowed by group rules"
             }), 400
 
-        # ================= CALCULATIONS =================
+        # ================= CAP LOAN DURATION TO CYCLE END =================
+        warning_message = None
+        original_months = months
+        
+        if cycle_end_date:
+            try:
+                cycle_end = datetime.strptime(cycle_end_date, "%Y-%m-%d")
+                today = datetime.now()
+                remaining_days = (cycle_end - today).days
+                
+                if remaining_days <= 0:
+                    return jsonify({
+                        "error": "Cannot issue loans - cycle has ended. Please start a new cycle."
+                    }), 400
+                
+                max_months_available = remaining_days // 30
+                
+                if months > max_months_available:
+                    months = max(1, max_months_available)
+                    warning_message = (
+                        f"⚠️ Loan duration adjusted from {original_months} to {months} months "
+                        f"to fit within cycle end date ({cycle_end_date})"
+                    )
+            except ValueError:
+                pass
+
         interest = round(principal * interest_rate)
         total = principal + interest
 
         start_date = datetime.now()
         due_date = start_date + timedelta(days=30 * months)
 
-
-        # ================= INSERT =================
         db.execute("""
             INSERT INTO loans (
                 group_id,
@@ -1394,13 +1442,19 @@ def add_loan():
 
         db.commit()
 
-        return jsonify({
+        response_data = {
             "status": "success",
             "months": months,
             "due_date": due_date.strftime("%Y-%m-%d"),
             "interest": interest,
             "total": total
-        })
+        }
+        
+        if warning_message:
+            response_data["warning"] = warning_message
+            response_data["original_months"] = original_months
+
+        return jsonify(response_data)
 
     except Exception as e:
         db.rollback()
@@ -1410,10 +1464,7 @@ def add_loan():
 
 @app.route('/api/loans/<int:loan_id>', methods=['PUT'])
 def edit_loan(loan_id):
-    """
-    SAFE EDIT: Only allows editing due_date and status.
-    Principal, Interest, Total are NOT editable (accounting integrity).
-    """
+    """SAFE EDIT: Only allows editing due_date and status."""
     db = get_db()
     group_id = get_current_group_id()
     
@@ -1422,7 +1473,6 @@ def edit_loan(loan_id):
     
     data = request.get_json()
     
-    # Verify loan belongs to current group
     loan = db.execute(
         "SELECT id FROM loans WHERE id = ? AND group_id = ?",
         (loan_id, group_id)
@@ -1438,7 +1488,6 @@ def edit_loan(loan_id):
         return jsonify({"error": "Invalid status"}), 400
     
     try:
-        # Validate date format
         datetime.strptime(due_date_str, "%Y-%m-%d")
         
         db.execute(
@@ -1482,7 +1531,6 @@ def add_rejesho():
     except ValueError:
         return jsonify({"error": "Invalid loan ID or amount format"}), 400
 
-    # Verify loan belongs to current group
     loan = db.execute(
         "SELECT id FROM loans WHERE id = ? AND group_id = ?",
         (loan_id, group_id)
@@ -1511,7 +1559,6 @@ def get_rejesho_history(loan_id):
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    # Verify loan belongs to current group
     loan_info = db.execute(
         "SELECT l.*, m.name as member_name FROM loans l JOIN members m ON l.member_id = m.id WHERE l.id = ? AND l.group_id = ?",
         (loan_id, group_id)
@@ -1545,7 +1592,6 @@ def get_penalties():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
 
-    # Query to fetch all penalties and their payment status
     ledger = db.execute("""
         SELECT 
             p.id,
@@ -1562,7 +1608,6 @@ def get_penalties():
         ORDER BY p.date DESC, p.id DESC
     """, (group_id,)).fetchall()
 
-    # Calculate total outstanding penalty amount for the summary card
     total_due = db.execute(
         "SELECT SUM(amount - COALESCE(amount_paid, 0)) FROM penalties WHERE group_id = ?",
         (group_id,)
@@ -1590,7 +1635,6 @@ def add_penalty():
     if not member_id or not ptype or amount <= 0:
         return jsonify({"error": "Member ID, type, and positive amount are required"}), 400
 
-    # Verify member belongs to current group
     member = db.execute(
         "SELECT id FROM members WHERE id = ? AND group_id = ?",
         (member_id, group_id)
@@ -1626,7 +1670,6 @@ def record_penalty_payment(penalty_id):
         return jsonify({"error": "A valid payment amount is required."}), 400
 
     try:
-        # Fetch the penalty record and verify it belongs to current group
         penalty = db.execute(
             "SELECT amount, COALESCE(amount_paid, 0) AS amount_paid, member_id FROM penalties WHERE id = ? AND group_id = ?",
             (penalty_id, group_id)
@@ -1640,17 +1683,14 @@ def record_penalty_payment(penalty_id):
         if remaining_due <= 0:
              return jsonify({"error": "Penalty is already fully paid."}), 400
              
-        # Actual amount to apply to prevent over-paying
         applied_amount = min(amount_to_pay, remaining_due) 
 
-        # Update the penalty record's amount_paid column
         new_paid_total = penalty['amount_paid'] + applied_amount
         db.execute(
             "UPDATE penalties SET amount_paid = ? WHERE id = ? AND group_id = ?",
             (new_paid_total, penalty_id, group_id)
         )
         
-        # Log the transaction for audit
         db.execute(
             "INSERT INTO contributions (group_id, member_id, type, amount, date) VALUES (?, ?, 'penalty_payment', ?, datetime('now'))",
             (group_id, penalty['member_id'], applied_amount)
@@ -1676,7 +1716,6 @@ def edit_penalty(penalty_id):
         return jsonify({"error": "No group selected"}), 400
     
     if request.method == 'DELETE':
-        # Safety check: Don't delete auto-generated loan penalties
         penalty = db.execute(
             "SELECT type, loan_id FROM penalties WHERE id = ? AND group_id = ?", 
             (penalty_id, group_id)
@@ -1707,7 +1746,6 @@ def edit_penalty(penalty_id):
         return jsonify({"error": "Amount must be positive"}), 400
     
     try:
-        # Get current amount_paid to preserve payment history
         current = db.execute(
             "SELECT amount_paid FROM penalties WHERE id = ? AND group_id = ?", 
             (penalty_id, group_id)
@@ -1718,7 +1756,6 @@ def edit_penalty(penalty_id):
         
         amount_paid = current['amount_paid'] or 0
         
-        # Don't allow setting amount below what's already been paid
         if amount < amount_paid:
             return jsonify({
                 "error": f"Amount cannot be less than already paid: {amount_paid:,.0f} TZS"
@@ -1751,16 +1788,13 @@ def calculate_profits():
     
     data = request.get_json() or {}
     
-    # Proposed additional Jamii expense from user input
     temp_jamii_used = float(data.get("jamii_used", 0))
-    method = data.get("method", "cash")
 
     profit_data = get_current_group_profit(db, group_id)
+    settings = get_group_settings(db, group_id)
 
-    # Total Jamii Expenses = Historical + Proposed
     total_jamii_expense = profit_data["historical_jamii_spent"] + temp_jamii_used
     
-    # Net Profit = Gross Pool - Leadership Pay - Total Jamii Expenses
     net_profit = max(
         profit_data["gross_distributable_pool"]
         - profit_data["leadership_pay_amount"]
@@ -1768,11 +1802,12 @@ def calculate_profits():
         0
     )
 
-    # Total HISA ONLY (excluding hisa anzia) for profit distribution
-    total_savings = get_total_savings(db, group_id)
-    if total_savings == 0:
+    # ========== HISA UNIT SYSTEM ==========
+    total_units = get_total_hisa_units(db, group_id)
+    
+    if total_units == 0:
         return jsonify({
-            "error": "No Hisa (savings) available for profit distribution base",
+            "error": "No Hisa units available for profit distribution",
             "net_profit_to_distribute": 0,
             "breakdown": [],
             "leadership_pay_amount": profit_data["leadership_pay_amount"], 
@@ -1780,58 +1815,40 @@ def calculate_profits():
             "historical_jamii_spent": profit_data["historical_jamii_spent"],
         })
     
+    profit_per_unit = net_profit / total_units
+    
     admin_id = get_group_admin_member_id(db, group_id)
-
     members = db.execute(
         "SELECT id, name FROM members WHERE group_id = ? AND is_system = 0", 
         (group_id,)
     ).fetchall()
+    
     results = []
 
     for m in members:
         member_id = m['id']
         
-        # Get ALL savings (hisa + hisa anzia) for display
-        total_savings_member = db.execute(
-            "SELECT SUM(amount) FROM contributions WHERE member_id=? AND group_id=? AND type IN ('hisa','hisa anzia')",
-            (member_id, group_id)
-        ).fetchone()[0] or 0
+        hisa_data = get_member_hisa_units(db, member_id, group_id)
+        member_units = hisa_data['units']
+        total_savings_member = hisa_data['total_contributed']
         
-        # Get ONLY HISA (excluding hisa anzia) for profit share calculation
-        hisa_only = db.execute(
-            "SELECT SUM(amount) FROM contributions WHERE member_id=? AND group_id=? AND type = 'hisa'",
-            (member_id, group_id)
-        ).fetchone()[0] or 0
+        profit_share = round(member_units * profit_per_unit)
 
-        share_ratio = hisa_only / total_savings if total_savings > 0 else 0
-        profit_share = round(net_profit * share_ratio)
+        loan_balances = get_member_loan_balances(db, member_id, group_id)
+        remaining_loan_balance = loan_balances["remaining_loans"]
 
-        # Loan balances
-        loans_total = db.execute(
-            "SELECT SUM(total) FROM loans WHERE member_id=? AND group_id=?", 
-            (member_id, group_id)
-        ).fetchone()[0] or 0
-        repaid = db.execute(
-            "SELECT SUM(r.amount) FROM rejesho r JOIN loans l ON r.loan_id = l.id WHERE l.member_id=? AND l.group_id=?", 
-            (member_id, group_id)
-        ).fetchone()[0] or 0
-        remaining_loan_balance = max(loans_total - repaid, 0)
-
-        # Penalties due
         total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
 
-        # Jamii shortfall
         jamii_status = get_member_jamii_balance(db, member_id, group_id)
         jamii_shortfall = jamii_status['shortfall']
 
-        # Total Deductions
         total_deductions = remaining_loan_balance + total_penalties_due + jamii_shortfall
         
-        # Final Payout = Total Savings + Profit Share - Deductions
         final_payout = max((total_savings_member + profit_share) - total_deductions, 0)
 
         results.append({
             "member_name": m["name"],
+            "hisa_units": round(member_units, 2),
             "savings": total_savings_member,
             "profit_share": profit_share,
             "loan_balance_due": remaining_loan_balance,
@@ -1854,6 +1871,8 @@ def calculate_profits():
         "total_jamii_expenses": total_jamii_expense,
         
         "net_profit_to_distribute": net_profit,
+        "total_hisa_units": round(total_units, 2),
+        "profit_per_unit": round(profit_per_unit, 2),
         "breakdown": results
     })
 
@@ -1871,16 +1890,14 @@ def get_report_data():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    # 1. Get Group-wide metrics
     profit_data = get_current_group_profit(db, group_id)
     total_profit = profit_data["net_profit_pool"]
     
-    # Total HISA only (excluding hisa anzia) for profit distribution
-    total_hisa_only = get_total_savings(db, group_id)
+    total_units = get_total_hisa_units(db, group_id)
+    profit_per_unit = total_profit / total_units if total_units > 0 else 0
     
     admin_id = get_group_admin_member_id(db, group_id)
 
-    # 2. Get Members for this group (Exclude system admin)
     members = db.execute(
         "SELECT id, name FROM members WHERE group_id = ? AND is_system = 0", 
         (group_id,)
@@ -1891,7 +1908,6 @@ def get_report_data():
     for m in members:
         member_id = m["id"]
         
-        # 3. Contributions by type for this specific group/member
         contribs = db.execute(
             """SELECT type, SUM(amount) as total FROM contributions 
                WHERE member_id=? AND group_id=? AND type != 'jamii_deduction' 
@@ -1902,18 +1918,15 @@ def get_report_data():
         contrib_dict = {c["type"]: c["total"] for c in contribs}
         total_contributions = sum(contrib_dict.values())
         
-        # Total savings (hisa + hisa anzia) for display
         member_total_savings = (contrib_dict.get('hisa anzia', 0) + contrib_dict.get('hisa', 0))
         
-        # Only HISA for profit calculation
-        member_hisa_only = contrib_dict.get('hisa', 0)
+        hisa_data = get_member_hisa_units(db, member_id, group_id)
+        member_units = hisa_data['units']
 
-        # 4. Helper calls (ensure group_id is passed)
         loan_balances = get_member_loan_balances(db, member_id, group_id)
         total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
         jamii_status = get_member_jamii_balance(db, member_id, group_id)
         
-        # 5. Financial Position Calculations
         net_contribution_position = (
             member_total_savings 
             - loan_balances["remaining_loans"] 
@@ -1921,14 +1934,14 @@ def get_report_data():
             - jamii_status["shortfall"]
         )
         
-        # Profit share based on HISA only
-        expected_profit_share = round((member_hisa_only / total_hisa_only) * total_profit) if total_hisa_only > 0 else 0
+        expected_profit_share = round(member_units * profit_per_unit)
         net_payout = net_contribution_position + expected_profit_share
 
         report_data.append({
             "member_name": m["name"],
             "contributions": contrib_dict,
             "total_contributions": total_contributions,
+            "hisa_units": round(member_units, 2),
             "total_loans": loan_balances["total_loans_committed"],
             "total_rejesho": loan_balances["total_rejesho"],
             "remaining_loans": loan_balances["remaining_loans"],
@@ -1955,7 +1968,6 @@ def download_report_pdf():
     
     buffer = BytesIO()
     
-    # PDF Setup
     doc = SimpleDocTemplate(
         buffer, pagesize=landscape(A4),
         rightMargin=20, leftMargin=20, topMargin=40, bottomMargin=20
@@ -1963,48 +1975,53 @@ def download_report_pdf():
     elements = []
     styles = getSampleStyleSheet()
 
-    # --- Group Info ---
     settings = get_group_settings(db, group_id)
     group_name = settings.get("group_name", "Kikoba App")
 
     title = Paragraph(f"📊 {group_name} - Monthly Financial Report", styles['Title'])
     elements.append(title)
     elements.append(Spacer(1, 12))
+    report_date = datetime.now().strftime("%B %Y")
+    subtitle = Paragraph(
+    f"<i>Report Period: {report_date}</i>",
+    styles['Normal']
+    )
+    elements.append(subtitle)
+    elements.append(Spacer(1, 10))
 
-    # --- Fetch Data ---
+
     response = get_report_data() 
     report_json = response.get_json()
     report_data = report_json.get("report", [])
 
-    # --- Totals for Summary ---
     total_contributions = sum(m['total_contributions'] for m in report_data)
     total_loans_due = sum(m['remaining_loans'] for m in report_data)
-    total_profit_share = sum(m['expected_profit_share'] for m in report_data)
+    #total_profit_share = sum(m['expected_profit_share'] for m in report_data)
 
-    # --- Summary Table ---
     summary_data = [
         [Paragraph("<b>Total Contributions</b>", styles['Normal']), f"{total_contributions:,.0f} TZS"],
         [Paragraph("<b>Total Loans Outstanding</b>", styles['Normal']), f"{total_loans_due:,.0f} TZS"],
-        [Paragraph("<b>Distributable Profit</b>", styles['Normal']), f"{total_profit_share:,.0f} TZS"]
+        #[Paragraph("<b>Distributable Profit</b>", styles['Normal']), f"{total_profit_share:,.0f} TZS"]
     ]
     summary_table = Table(summary_data, colWidths=[150, 100])
     summary_table.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), colors.whitesmoke),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey)
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('FONTSIZE', (0,0), (-1,-1), 12)
+
     ]))
     elements.append(summary_table)
     elements.append(Spacer(1, 20))
 
-    # --- Main Table ---
     headers = [
-        "Member", "Hisa Anzia", "Hisa", "Jamii", "Total Contrib",
-        "Loans Taken", "Rejesho", "Loan Due", "Penalties", "Profits Share", "Net Payout"
-    ]
+        "Member", "Units", "Hisa Anzia", "Hisa", "Jamii", "Total Contrib",
+        "Loans Taken", "Rejesho", "Loan Due", "Penalties"] #"Profits Share", "Net Payout"]
     data = [headers]
 
     for m in report_data:
         data.append([
             m['member_name'],
+            f"{m.get('hisa_units', 0):.2f}",
             f"{m['contributions'].get('hisa anzia',0):,.0f}",
             f"{m['contributions'].get('hisa',0):,.0f}",
             f"{m['contributions'].get('jamii',0):,.0f}",
@@ -2013,8 +2030,8 @@ def download_report_pdf():
             f"{m['total_rejesho']:,.0f}",
             f"{m['remaining_loans']:,.0f}",
             f"{m['total_penalties']:,.0f}",
-            f"{m['expected_profit_share']:,.0f}",
-            f"{m['net_payout']:,.0f}"
+            #f"{m['expected_profit_share']:,.0f}",
+            #f"{m['net_payout']:,.0f}"
         ])
 
     table = Table(data, repeatRows=1)
@@ -2022,10 +2039,19 @@ def download_report_pdf():
         ('BACKGROUND', (0,0), (-1,0), colors.green),
         ('TEXTCOLOR', (0,0), (-1,0), colors.white),
         ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
-        ('FONTSIZE', (0,0), (-1,-1), 8),
+        ('FONTSIZE', (0,0), (-1,-1), 10),
         ('GRID', (0,0), (-1,-1), 0.3, colors.grey),
     ]))
     elements.append(table)
+
+    generated_on = datetime.now().strftime("%d %b %Y")
+    generated_text = Paragraph(
+    f"<font size=8>Generated on: {generated_on}</font>",
+    styles['Normal']
+)
+    elements.append(Spacer(1, 6))
+    elements.append(generated_text)
+
 
     doc.build(elements)
     buffer.seek(0)
@@ -2043,7 +2069,6 @@ def export_raw_backup():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    # All queries MUST filter by group_id
     queries = {
         "members": "SELECT * FROM members WHERE group_id = ? AND is_system = 0",
         "contributions": """
@@ -2076,7 +2101,6 @@ def export_raw_backup():
     zip_buffer = BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
-        # --- PART 1: RAW TABLES ---
         for file_name, sql in queries.items():
             cursor = db.execute(sql, (group_id,))
             rows = cursor.fetchall()
@@ -2093,7 +2117,6 @@ def export_raw_backup():
             zip_file.writestr(f"{file_name}.csv", csv_buffer.getvalue())
             csv_buffer.close()
 
-        # --- PART 2: THE BALANCE SHEET SUMMARY ---
         admin_id = get_group_admin_member_id(db, group_id)
         members = db.execute(
             "SELECT id, name FROM members WHERE group_id = ? AND is_system = 0", 
@@ -2103,23 +2126,22 @@ def export_raw_backup():
         balance_csv = StringIO()
         balance_writer = csv.writer(balance_csv)
         balance_writer.writerow([
-            "Member Name", "Hisa (Savings)", "Jamii Paid", 
+            "Member Name", "Hisa Units", "Hisa (Savings)", "Jamii Paid", 
             "Jamii Shortfall", "Loan Balance", "Unpaid Penalties"
         ])
 
         for m in members:
             m_id = m['id']
-            hisa = db.execute(
-                "SELECT SUM(amount) FROM contributions WHERE member_id=? AND group_id=? AND type IN ('hisa', 'hisa anzia')", 
-                (m_id, group_id)
-            ).fetchone()[0] or 0
+            hisa_data = get_member_hisa_units(db, m_id, group_id)
+            hisa = hisa_data['total_contributed']
+            units = hisa_data['units']
             
             jamii_status = get_member_jamii_balance(db, m_id, group_id)
             loan_bal = get_member_loan_balances(db, m_id, group_id)['remaining_loans']
             penalty_bal = get_total_penalties_due_for_member(m_id, db, group_id)
 
             balance_writer.writerow([
-                m['name'], hisa, jamii_status['total_paid'], 
+                m['name'], f"{units:.2f}", hisa, jamii_status['total_paid'], 
                 jamii_status['shortfall'], loan_bal, penalty_bal
             ])
 
