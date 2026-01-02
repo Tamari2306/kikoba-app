@@ -76,7 +76,9 @@ def create_new_group(db, group_name, admin_id):
         ('jamii_frequency', 'monthly'),
         ('cycle_start_date', ''),
         ('cycle_end_date', ''),
-        ('hisa_unit_price', '5000')
+        ('hisa_unit_price', '5000'),
+        ('loan_tier5_amount', '10000000'), 
+        ('loan_tier5_months', '12')         
     ]
 
     for key, value in defaults:
@@ -114,7 +116,9 @@ def get_group_settings(db, group_id):
         'loan_tier3_amount': '2000000',
         'loan_tier3_months': '6',
         'loan_tier4_amount': '5000000',
-        'loan_tier4_months': '9'
+        'loan_tier4_months': '9',
+        'loan_tier5_amount': '10000000',  # ADD THIS
+        'loan_tier5_months': '12'         
     }
     
     for key, default_value in defaults.items():
@@ -769,6 +773,8 @@ def get_dashboard_data():
         "loan_tier3_months": settings.get('loan_tier3_months', '6'),
         "loan_tier4_amount": settings.get('loan_tier4_amount', '5000000'),
         "loan_tier4_months": settings.get('loan_tier4_months', '9'),
+        "loan_tier5_amount": settings.get('loan_tier5_amount', '10000000'),  
+        "loan_tier5_months": settings.get('loan_tier5_months', '12'),
     })
 
 # ==================== CONFIGURATION ROUTES ====================
@@ -856,6 +862,8 @@ def handle_settings():
         ('loan_tier3_months', data.get('loan_tier3_months')),
         ('loan_tier4_amount', data.get('loan_tier4_amount')),
         ('loan_tier4_months', data.get('loan_tier4_months')),
+        ('loan_tier5_amount', data.get('loan_tier5_amount')),  
+        ('loan_tier5_months', data.get('loan_tier5_months')), 
     ]
 
     try:
@@ -1393,6 +1401,8 @@ def add_loan():
              int(settings.get("loan_tier3_months", 6))),
             (float(settings.get("loan_tier4_amount", 5000000)),
              int(settings.get("loan_tier4_months", 9))),
+             (float(settings.get("loan_tier5_amount", 10000000)),  
+            int(settings.get("loan_tier5_months", 12))), 
         ]
 
         months = None

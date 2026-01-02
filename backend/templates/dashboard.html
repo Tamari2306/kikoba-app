@@ -154,6 +154,14 @@
                 <label class="form-label">Tier 4: Duration (Months)</label>
                 <input type="number" class="form-control" name="loan_tier4_months" id="loan_tier4_months">
             </div>
+            <div class="col-md-6">
+                <label class="form-label">Tier 5: Max Amount (TZS)</label>
+                <input type="number" class="form-control" name="loan_tier5_amount" id="loan_tier5_amount">
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Tier 5: Duration (Months)</label>
+                <input type="number" class="form-control" name="loan_tier5_months" id="loan_tier5_months">
+            </div>
           </div>
 
           <button type="submit" class="btn btn-success btn-lg w-100">
@@ -401,6 +409,8 @@ function loadCurrentSettings(d) {
     document.getElementById("loan_tier3_months").value = d.loan_tier3_months || 6;
     document.getElementById("loan_tier4_amount").value = d.loan_tier4_amount || 5000000;
     document.getElementById("loan_tier4_months").value = d.loan_tier4_months || 9;
+    document.getElementById("loan_tier5_amount").value = d.loan_tier5_amount || 10000000;  
+    document.getElementById("loan_tier5_months").value = d.loan_tier5_months || 12;        
 
     updateCycleDuration();
 }
