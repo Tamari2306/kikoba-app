@@ -2,7 +2,7 @@ import zipfile
 from flask import Flask, redirect, request, jsonify, render_template, send_file, send_from_directory, session, g
 from flask_cors import CORS
 import psycopg2
-from backend.db import get_db, init_app as init_db_app
+from db import get_db, init_app as init_db_app
 from backend.models import init_db, calculate_due_date, calculate_penalty 
 from config import config
 from datetime import date, datetime, timedelta
