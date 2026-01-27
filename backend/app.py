@@ -4,7 +4,6 @@ from flask_cors import CORS
 import psycopg2
 from db import get_db, init_app as init_db_app
 from models import init_db, calculate_due_date, calculate_penalty 
-from config import config
 from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
 from reportlab.lib.pagesizes import A4, landscape
@@ -18,13 +17,13 @@ import os
 import csv
 from werkzeug.security import generate_password_hash, check_password_hash
 import psycopg2.extras
-
+from config import Config
 
 app = Flask(__name__)
+app.config.from_object(Config)
 
 # Load configuration
 env = os.environ.get('FLASK_ENV', 'development')
-app.config.from_object(config[env])
 
 # Initialize CORS
 CORS(app, origins=app.config['CORS_ORIGINS'])
