@@ -3,7 +3,7 @@ from flask import Flask, redirect, request, jsonify, render_template, send_file,
 from flask_cors import CORS
 import psycopg2
 from db import get_db, init_app as init_db_app
-from backend.models import init_db, calculate_due_date, calculate_penalty 
+from models import init_db, calculate_due_date, calculate_penalty 
 from config import config
 from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
@@ -2591,7 +2591,7 @@ def export_raw_backup():
     )
 
 if __name__ == "__main__":
-    from backend.models import init_db
+    from models import init_db
     with app.app_context():
         init_db()
     app.run(debug=True)
