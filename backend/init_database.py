@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import after loading .env
-from backend.db import get_db
-from backend.models import init_db
+from db import get_db
+from models import init_db
 from flask import Flask
 
 def create_schema():

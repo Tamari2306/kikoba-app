@@ -2,7 +2,7 @@
 Database Models and Schema - PostgreSQL Version
 """
 
-from backend.db import get_db
+from db import get_db
 from datetime import datetime, timedelta
 import psycopg2.extras
 
