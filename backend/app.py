@@ -1,8 +1,10 @@
 import zipfile
-from flask import Flask, redirect, request, jsonify, render_template, send_file, send_from_directory, session
+from flask import Flask, redirect, request, jsonify, render_template, send_file, send_from_directory, session, g
 from flask_cors import CORS
-from backend.db import get_db, close_db
+import psycopg2
+from backend.db import get_db, init_app as init_db_app
 from backend.models import init_db, calculate_due_date, calculate_penalty 
+from config import config
 from datetime import date, datetime, timedelta
 from io import BytesIO, StringIO
 from reportlab.lib.pagesizes import A4, landscape
@@ -15,26 +17,57 @@ from werkzeug.utils import secure_filename
 import os
 import csv
 from werkzeug.security import generate_password_hash, check_password_hash
+import psycopg2.extras
 
 
 app = Flask(__name__)
-CORS(app)
 
-app.secret_key = "supersecretkey"
+# Load configuration
+env = os.environ.get('FLASK_ENV', 'development')
+app.config.from_object(config[env])
+
+# Initialize CORS
+CORS(app, origins=app.config['CORS_ORIGINS'])
+
+# Initialize database teardown
+init_db_app(app)
+
+# Create upload folder
+UPLOAD_FOLDER = app.config['UPLOAD_FOLDER']
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+
+
+# ==================== HELPER FUNCTION FOR CURSOR RESULTS ====================
+def get_single_value(cursor, default=None):
+    """Safely extract single value from cursor result (handles RealDictCursor)"""
+    result = cursor.fetchone()
+    if not result:
+        return default
+    values = list(result.values())
+    return values[0] if values and values[0] is not None else default
+
+def get_cursor(db):
+    """Get cursor with RealDictCursor factory for dictionary results"""
+    return db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
 def get_current_group_id():
     """Extract group_id from session, default to None"""
     return session.get("group_id")
 
+
 def get_group_admin_member_id(db, group_id):
-    row = db.execute(
+    cursor = get_cursor(db)
+    cursor.execute(
         """
         SELECT id
         FROM members
-        WHERE group_id = ? AND is_system = 1
+        WHERE group_id = %s AND is_system = 1
         """,
         (group_id,)
-    ).fetchone()
+    )
+    row = cursor.fetchone()
+    cursor.close()
 
     if not row:
         raise Exception(f"No system admin member found for group_id={group_id}")
@@ -42,31 +75,23 @@ def get_group_admin_member_id(db, group_id):
     return row["id"]
 
 
-UPLOAD_FOLDER = os.path.join(app.root_path, "uploads")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-
-
 # ==================== HELPER FUNCTIONS ====================
 def create_new_group(db, group_name, admin_id):
     """Create a new group and associate it with an admin"""
-    cursor = db.cursor()
+    cursor = get_cursor(db)
 
-    # Insert group with created_at
     cursor.execute("""
         INSERT INTO groups (name, created_at)
-        VALUES (?, datetime('now'))
+        VALUES (%s, CURRENT_TIMESTAMP)
+        RETURNING id
     """, (group_name,))
 
-    group_id = cursor.lastrowid
+    group_id = cursor.fetchone()["id"]
 
-    # Update admin to belong to this group
     cursor.execute("""
-        UPDATE members SET group_id = ? WHERE id = ?
+        UPDATE members SET group_id = %s WHERE id = %s
     """, (group_id, admin_id))
 
-    # Create default settings for this group
     defaults = [
         ('group_name', group_name),
         ('interest_rate', '0.10'),
@@ -84,18 +109,22 @@ def create_new_group(db, group_name, admin_id):
     for key, value in defaults:
         cursor.execute("""
             INSERT INTO settings (group_id, key, value)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
         """, (group_id, key, value))
 
     db.commit()
+    cursor.close()
     return group_id
 
 
 def get_group_settings(db, group_id):
-    settings = db.execute(
-        "SELECT key, value FROM settings WHERE group_id = ?", 
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT key, value FROM settings WHERE group_id = %s", 
         (group_id,)
-    ).fetchall()
+    )
+    settings = cursor.fetchall()
+    cursor.close()
     
     data = {s["key"]: s["value"] for s in settings}
 
@@ -117,7 +146,7 @@ def get_group_settings(db, group_id):
         'loan_tier3_months': '6',
         'loan_tier4_amount': '5000000',
         'loan_tier4_months': '9',
-        'loan_tier5_amount': '10000000',  # ADD THIS
+        'loan_tier5_amount': '10000000',
         'loan_tier5_months': '12'         
     }
     
@@ -131,11 +160,10 @@ def get_group_settings(db, group_id):
 
     return data
 
+
 def calculate_cycle_weeks(start_date_str, end_date_str):
-    """Calculate the number of weeks between two dates"""
     if not start_date_str or not end_date_str:
         return 0
-    
     try:
         start = datetime.strptime(start_date_str, "%Y-%m-%d")
         end = datetime.strptime(end_date_str, "%Y-%m-%d")
@@ -145,11 +173,10 @@ def calculate_cycle_weeks(start_date_str, end_date_str):
     except:
         return 0
 
+
 def calculate_cycle_months(start_date_str, end_date_str):
-    """Calculate the number of months between two dates"""
     if not start_date_str or not end_date_str:
         return 0
-    
     try:
         start = datetime.strptime(start_date_str, "%Y-%m-%d")
         end = datetime.strptime(end_date_str, "%Y-%m-%d")
@@ -158,20 +185,22 @@ def calculate_cycle_months(start_date_str, end_date_str):
     except:
         return 0
 
+
 def get_member_hisa_units(db, member_id, group_id):
-    """Calculate member's HISA units based on contributions and unit price"""
     settings = get_group_settings(db, group_id)
     unit_price = float(settings.get('hisa_unit_price', 5000))
     
-    # Count both 'hisa' AND 'jamii' contributions (jamii now treated like hisa)
-    total_hisa = db.execute(
+    cursor = get_cursor(db)
+    cursor.execute(
         """
         SELECT SUM(amount) 
         FROM contributions 
-        WHERE member_id = ? AND group_id = ? AND type IN ('hisa')
+        WHERE member_id = %s AND group_id = %s AND type IN ('hisa')
         """,
         (member_id, group_id)
-    ).fetchone()[0] or 0
+    )
+    total_hisa = get_single_value(cursor, 0)
+    cursor.close()
     
     units = total_hisa / unit_price if unit_price > 0 else 0
     
@@ -181,151 +210,159 @@ def get_member_hisa_units(db, member_id, group_id):
         "unit_price": unit_price
     }
 
+
 def get_total_hisa_units(db, group_id):
-    """Get total HISA units in the group (now includes Jamii)"""
     settings = get_group_settings(db, group_id)
     unit_price = float(settings.get('hisa_unit_price', 5000))
     admin_id = get_group_admin_member_id(db, group_id)
     
-    # Include both hisa and jamii contributions
-    total_hisa = db.execute(
+    cursor = get_cursor(db)
+    cursor.execute(
         """
         SELECT SUM(amount) 
         FROM contributions 
-        WHERE group_id = ? AND type IN ('hisa') AND member_id != ?
+        WHERE group_id = %s AND type IN ('hisa') AND member_id != %s
         """,
         (group_id, admin_id)
-    ).fetchone()[0] or 0
+    )
+    total_hisa = get_single_value(cursor, 0)
+    cursor.close()
     
     units = total_hisa / unit_price if unit_price > 0 else 0
     return units
 
+
 def get_member_jamii_balance(db, member_id, group_id):
-    """
-    Get member's Jamii contributions (now optional, just for display).
-    No longer calculates shortfall or expected amounts.
-    """
-    total_paid = db.execute(
+    cursor = get_cursor(db)
+    cursor.execute(
         """
         SELECT SUM(amount) 
         FROM contributions 
-        WHERE member_id = ? AND group_id = ? AND type = 'jamii'
+        WHERE member_id = %s AND group_id = %s AND type = 'jamii'
         """,
         (member_id, group_id)
-    ).fetchone()[0] or 0
+    )
+    total_paid = get_single_value(cursor, 0)
+    cursor.close()
     
     return {
         "total_paid": total_paid,
-        "expected_total": 0,  # No longer mandatory
-        "shortfall": 0,  # No longer calculated
+        "expected_total": 0,
+        "shortfall": 0,
         "periods": 0
     }
 
+
 def get_total_principal_loaned(db, group_id):
-    """Calculates the total principal amount disbursed across all loans for a specific group."""
-    result = db.execute(
-        "SELECT SUM(principal) FROM loans WHERE group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT SUM(principal) FROM loans WHERE group_id = %s",
         (group_id,)
-    ).fetchone()[0]
-    
+    )
+    result = get_single_value(cursor)
+    cursor.close()
     return result if result else 0
 
+
 def get_current_group_profit(db, group_id):
-    """
-    Calculates the total profit available for distribution.
-    NO LONGER INCLUDES JAMII - Jamii is now treated like Hisa and returned to members.
-    """
     settings = get_group_settings(db, group_id)
     LEADERSHIP_PAY_AMOUNT = float(settings.get('leadership_pay_amount', 0))
-    
     admin_id = get_group_admin_member_id(db, group_id)
 
-    # Count only non-system members
-    total_members = db.execute(
-        "SELECT COUNT(id) FROM members WHERE group_id = ? AND is_system = 0",
-        (group_id,)
-    ).fetchone()[0] or 0
-
-    # Total interest from loans
-    total_interest = db.execute(
-        "SELECT SUM(total - principal) FROM loans WHERE group_id = ?",
-        (group_id,)
-    ).fetchone()[0] or 0
+    cursor = get_cursor(db)
     
-    # Penalties
+    cursor.execute(
+        "SELECT COUNT(id) FROM members WHERE group_id = %s AND is_system = 0",
+        (group_id,)
+    )
+    total_members = get_single_value(cursor, 0)
+
+    cursor.execute(
+        "SELECT SUM(total - principal) FROM loans WHERE group_id = %s",
+        (group_id,)
+    )
+    total_interest = get_single_value(cursor, 0)
+    
     total_penalties_imposed = get_total_penalties_imposed(db, group_id)
     total_penalties_revenue = get_total_penalties_paid(db, group_id)
 
-    # Jamii is NO LONGER part of profit calculation
-    # It's just tracked for returning to members like Hisa
-    total_jamii_collected = db.execute(
-        "SELECT SUM(amount) FROM contributions WHERE type='jamii' AND group_id = ?",
+    cursor.execute(
+        "SELECT SUM(amount) FROM contributions WHERE type='jamii' AND group_id = %s",
         (group_id,)
-    ).fetchone()[0] or 0
+    )
+    total_jamii_collected = get_single_value(cursor, 0)
+    cursor.close()
     
-    # Gross distributable pool = Interest + Penalties ONLY (no Jamii)
     gross_distributable_pool = total_interest + total_penalties_imposed
-    
-    # Net profit = Gross - Leadership pay
     net_profit_pool = max(gross_distributable_pool - LEADERSHIP_PAY_AMOUNT, 0)
     
     return {
         "total_interest": total_interest,
         "total_penalties_imposed": total_penalties_imposed,
         "total_penalties_revenue": total_penalties_revenue,
-        "total_jamii_collected": total_jamii_collected,  # For display only
+        "total_jamii_collected": total_jamii_collected,
         "leadership_pay_amount": LEADERSHIP_PAY_AMOUNT, 
         "gross_distributable_pool": gross_distributable_pool,
         "net_profit_pool": net_profit_pool
     }
 
+
 def get_total_savings(db, group_id):
-    """Get total member savings (Hisa + Jamii, excluding hisa anzia)"""
     admin_id = get_group_admin_member_id(db, group_id)
-    result = db.execute(
+    cursor = get_cursor(db)
+    cursor.execute(
         """
         SELECT SUM(amount) 
         FROM contributions 
-        WHERE group_id = ? AND type IN ('hisa', 'jamii') AND member_id != ?
+        WHERE group_id = %s AND type IN ('hisa', 'jamii') AND member_id != %s
         """,
         (group_id, admin_id)
-    ).fetchone()[0]
-    
+    )
+    result = get_single_value(cursor)
+    cursor.close()
     return result if result else 0
 
-def get_total_outstanding_loans(db, group_id):
-    """Calculates actual money owed by members of a specific group."""
-    # FIX: Use principal instead of total (members owe principal only)
-    total_liability = db.execute(
-        "SELECT SUM(principal) FROM loans WHERE group_id = ? AND status != 'Cleared'",
-        (group_id,)
-    ).fetchone()[0] or 0
 
-    total_repaid = db.execute(
+def get_total_outstanding_loans(db, group_id):
+    cursor = get_cursor(db)
+    
+    cursor.execute(
+        "SELECT SUM(principal) FROM loans WHERE group_id = %s AND status != 'Cleared'",
+        (group_id,)
+    )
+    total_liability = get_single_value(cursor, 0)
+
+    cursor.execute(
         """
         SELECT SUM(r.amount) FROM rejesho r
         JOIN loans l ON r.loan_id = l.id
-        WHERE l.group_id = ? AND l.status != 'Cleared'
+        WHERE l.group_id = %s AND l.status != 'Cleared'
         """,
         (group_id,)
-    ).fetchone()[0] or 0
+    )
+    total_repaid = get_single_value(cursor, 0)
+    cursor.close()
 
     return max(total_liability - total_repaid, 0)
 
+
 def update_loan_status(db, loan_id, group_id):
-    """Updates the loan status in the database based on repayments."""
-    loan = db.execute(
-        "SELECT * FROM loans WHERE id = ? AND group_id = ?", 
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT * FROM loans WHERE id = %s AND group_id = %s", 
         (loan_id, group_id)
-    ).fetchone()
+    )
+    loan = cursor.fetchone()
     
     if not loan:
+        cursor.close()
         return
     
-    repaid = db.execute(
-        "SELECT SUM(amount) FROM rejesho WHERE loan_id = ? AND group_id = ?",
+    cursor.execute(
+        "SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s",
         (loan_id, group_id)
-    ).fetchone()[0] or 0
+    )
+    repaid = get_single_value(cursor, 0)
     
     remaining = loan["total"] - repaid
     
@@ -337,30 +374,29 @@ def update_loan_status(db, loan_id, group_id):
         new_status = "Active"
     
     if loan["status"] != new_status:
-        db.execute(
-            "UPDATE loans SET status = ? WHERE id = ? AND group_id = ?",
+        cursor.execute(
+            "UPDATE loans SET status = %s WHERE id = %s AND group_id = %s",
             (new_status, loan_id, group_id)
         )
         db.commit()
+    cursor.close()
+
 
 def auto_insert_loan_penalties(group_id):
-    """
-    NEW PENALTY SYSTEM: Finds overdue MONTHLY REJESHO payments and charges 1000/day per late payment.
-    """
     db = get_db()
+    cursor = get_cursor(db)
 
     settings = get_group_settings(db, group_id)
     daily_penalty = float(settings.get("daily_penalty_amount", 1000))
-
     today = datetime.now().date()
 
-    # Get all active/overdue loans
-    active_loans = db.execute("""
+    cursor.execute("""
         SELECT l.id, l.member_id, l.principal, l.months, l.start_date, l.due_date
         FROM loans l
-        WHERE l.group_id = ? 
+        WHERE l.group_id = %s 
           AND l.status IN ('Active', 'Overdue')
-    """, (group_id,)).fetchall()
+    """, (group_id,))
+    active_loans = cursor.fetchall()
 
     for loan in active_loans:
         loan_id = loan['id']
@@ -368,23 +404,20 @@ def auto_insert_loan_penalties(group_id):
         monthly_rejesho = loan['principal'] / loan['months']
         start_date = datetime.strptime(loan['start_date'], "%Y-%m-%d").date()
         
-        # Check each monthly payment
         for month_num in range(1, loan['months'] + 1):
-            # Calculate due date for this month
             month_due_date = start_date + timedelta(days=30 * month_num)
             
             if today <= month_due_date:
-                continue  # Not yet due
+                continue
             
-            # Check how much has been paid by this due date
-            total_paid = db.execute("""
+            cursor.execute("""
                 SELECT SUM(amount) FROM rejesho 
-                WHERE loan_id = ? AND group_id = ?
-            """, (loan_id, group_id)).fetchone()[0] or 0
+                WHERE loan_id = %s AND group_id = %s
+            """, (loan_id, group_id))
+            total_paid = get_single_value(cursor, 0)
             
             expected_by_this_month = monthly_rejesho * month_num
             
-            # If underpaid for this month, calculate penalty
             if total_paid < expected_by_this_month:
                 days_late = (today - month_due_date).days
                 
@@ -393,67 +426,68 @@ def auto_insert_loan_penalties(group_id):
                 
                 penalty_amount = days_late * daily_penalty
                 
-                # Check if penalty already exists for this specific month
-                exists = db.execute("""
+                cursor.execute("""
                     SELECT 1 FROM penalties
-                    WHERE loan_id = ? AND group_id = ? 
+                    WHERE loan_id = %s AND group_id = %s 
                       AND type = 'monthly_rejesho_late'
-                      AND description LIKE ?
-                """, (loan_id, group_id, f"%Month {month_num}%")).fetchone()
+                      AND description LIKE %s
+                """, (loan_id, group_id, f"%Month {month_num}%"))
+                exists = cursor.fetchone()
                 
                 if exists:
-                    # Update existing penalty amount
-                    db.execute("""
+                    cursor.execute("""
                         UPDATE penalties 
-                        SET amount = ?, date = ?
-                        WHERE loan_id = ? AND group_id = ?
+                        SET amount = %s, date = %s
+                        WHERE loan_id = %s AND group_id = %s
                           AND type = 'monthly_rejesho_late'
-                          AND description LIKE ?
+                          AND description LIKE %s
                     """, (penalty_amount, today.strftime("%Y-%m-%d"), 
                           loan_id, group_id, f"%Month {month_num}%"))
                 else:
-                    # Insert new penalty
-                    db.execute("""
+                    cursor.execute("""
                         INSERT INTO penalties (
                             group_id, member_id, loan_id, type, amount,
                             description, date
-                        ) VALUES (?, ?, ?, 'monthly_rejesho_late', ?, ?, ?)
+                        ) VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s)
                     """, (
                         group_id, member_id, loan_id, penalty_amount,
                         f"Month {month_num} rejesho overdue by {days_late} days",
                         today.strftime("%Y-%m-%d")
                     ))
         
-        # Update loan status
-        total_paid_overall = db.execute(
-            "SELECT SUM(amount) FROM rejesho WHERE loan_id = ? AND group_id = ?",
+        cursor.execute(
+            "SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s",
             (loan_id, group_id)
-        ).fetchone()[0] or 0
+        )
+        total_paid_overall = get_single_value(cursor, 0)
         
         remaining = loan['principal'] - total_paid_overall
         
         if remaining <= 0:
-            db.execute("UPDATE loans SET status = 'Cleared' WHERE id = ?", (loan_id,))
+            cursor.execute("UPDATE loans SET status = 'Cleared' WHERE id = %s", (loan_id,))
         elif today > datetime.strptime(loan['due_date'], "%Y-%m-%d").date():
-            db.execute("UPDATE loans SET status = 'Overdue' WHERE id = ?", (loan_id,))
+            cursor.execute("UPDATE loans SET status = 'Overdue' WHERE id = %s", (loan_id,))
 
     db.commit()
+    cursor.close()
+
 
 def get_member_loan_balances(db, member_id, group_id):
-    """Calculates loan balances for a member within a specific group."""
     today_date = date.today()
     total_overdue_balance = 0
-    total_loans_committed = 0  # This will be total PRINCIPAL (what member requested)
+    total_loans_committed = 0
     total_rejesho = 0
     
-    loans_rows = db.execute(
-        "SELECT id, principal, due_date, status FROM loans WHERE member_id=? AND group_id=?", 
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, principal, due_date, status FROM loans WHERE member_id=%s AND group_id=%s", 
         (member_id, group_id)
-    ).fetchall()
+    )
+    loans_rows = cursor.fetchall()
 
     for loan in loans_rows:
         loan_id = loan['id']
-        loan_principal = loan['principal']  # FIX: Use principal, not total
+        loan_principal = loan['principal']
         loan_due_date_str = loan['due_date']
         
         try:
@@ -461,94 +495,88 @@ def get_member_loan_balances(db, member_id, group_id):
         except (ValueError, TypeError):
             loan_due_date = today_date + timedelta(days=1)
         
-        # FIX: Total loans committed = sum of all principals
         total_loans_committed += loan_principal
         
-        repaid_amount = db.execute(
-            "SELECT SUM(amount) FROM rejesho WHERE loan_id=? AND group_id=?", 
+        cursor.execute(
+            "SELECT SUM(amount) FROM rejesho WHERE loan_id=%s AND group_id=%s", 
             (loan_id, group_id)
-        ).fetchone()[0] or 0
+        )
+        repaid_amount = get_single_value(cursor, 0)
         
         total_rejesho += repaid_amount
-        
-        # FIX: Remaining = Principal - Repaid (interest already deducted)
         remaining_balance = max(loan_principal - repaid_amount, 0)
         
         if remaining_balance > 0 and loan_due_date < today_date:
             total_overdue_balance += remaining_balance
     
-    # FIX: Remaining loans = Total Principal - Total Repaid
+    cursor.close()
     remaining_loans = max(total_loans_committed - total_rejesho, 0)
     
     return {
-        "total_loans_committed": total_loans_committed,  # Total principal taken
+        "total_loans_committed": total_loans_committed,
         "total_rejesho": total_rejesho,
-        "remaining_loans": remaining_loans,  # Principal - Repaid
+        "remaining_loans": remaining_loans,
         "total_overdue": total_overdue_balance
     }
 
+
 def get_total_penalties_due_for_member(member_id, db, group_id):
-    """Returns the NET OUTSTANDING penalties (liability) for a member in a group."""
-    row = db.execute("""
+    cursor = get_cursor(db)
+    cursor.execute("""
         SELECT SUM(amount - COALESCE(amount_paid, 0)) AS total_outstanding
         FROM penalties
-        WHERE member_id = ? AND group_id = ?
-    """, (member_id, group_id)).fetchone()
+        WHERE member_id = %s AND group_id = %s
+    """, (member_id, group_id))
+    result = get_single_value(cursor, 0)
+    cursor.close()
+    return result
 
-    return row["total_outstanding"] or 0
-
-def calculate_penalty(loan, group_id):
-    """Calculates overdue penalty based on specific group settings."""
-    db = get_db()
-    
-    settings = get_group_settings(db, group_id)
-    PENALTY_RATE = float(settings.get('daily_penalty_amount', 1000))
-
-    try:
-        due_date = datetime.strptime(loan["due_date"], "%Y-%m-%d")
-    except:
-        return 0
-
-    today = datetime.now()
-    overdue_days = (today - due_date).days
-
-    return max(overdue_days * PENALTY_RATE, 0) if overdue_days > 0 else 0
 
 def get_total_penalties_for_member(member_id, group_id):
-    """Same as due_for_member but with auto-db access."""
     db = get_db()
-    row = db.execute("""
+    cursor = get_cursor(db)
+    cursor.execute("""
         SELECT SUM(amount - COALESCE(amount_paid, 0)) AS total_outstanding
         FROM penalties
-        WHERE member_id = ? AND group_id = ?
-    """, (member_id, group_id)).fetchone()
-    return row["total_outstanding"] or 0
+        WHERE member_id = %s AND group_id = %s
+    """, (member_id, group_id))
+    result = get_single_value(cursor, 0)
+    cursor.close()
+    return result
+
 
 def get_total_penalties_imposed(db, group_id):
-    """Calculates the total gross amount of all penalties ever imposed for a group."""
-    row = db.execute(
-        "SELECT SUM(amount) AS total_imposed FROM penalties WHERE group_id = ?", 
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT SUM(amount) AS total_imposed FROM penalties WHERE group_id = %s", 
         (group_id,)
-    ).fetchone()
-    return row["total_imposed"] or 0
+    )
+    result = get_single_value(cursor, 0)
+    cursor.close()
+    return result
+
 
 def get_total_penalties_paid(db, group_id):
-    """Calculates the total amount of penalties actually PAID in this group."""
-    row = db.execute(
-        "SELECT SUM(COALESCE(amount_paid, 0)) AS total_paid FROM penalties WHERE group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT SUM(COALESCE(amount_paid, 0)) AS total_paid FROM penalties WHERE group_id = %s",
         (group_id,)
-    ).fetchone()
-    return row["total_paid"] or 0
+    )
+    result = get_single_value(cursor, 0)
+    cursor.close()
+    return result
+
 
 def get_total_group_penalty_liability(db, group_id):
-    """Calculates the total OUTSTANDING (unpaid) penalties for the entire group."""
-    row = db.execute("""
+    cursor = get_cursor(db)
+    cursor.execute("""
         SELECT SUM(amount - COALESCE(amount_paid, 0)) AS total_liability
         FROM penalties
-        WHERE group_id = ?
-    """, (group_id,)).fetchone()
-    return row["total_liability"] or 0
-
+        WHERE group_id = %s
+    """, (group_id,))
+    result = get_single_value(cursor, 0)
+    cursor.close()
+    return result
 
 # ==================== ROUTES ====================
 @app.route("/")
@@ -560,63 +588,73 @@ def index():
             return redirect("/create-group")
     
     db = get_db()
-    admin_exists = db.execute("SELECT 1 FROM members WHERE is_system=1").fetchone()
+    cursor = get_cursor(db)
+    cursor.execute("SELECT 1 FROM members WHERE is_system=1 LIMIT 1")
+    admin_exists = cursor.fetchone()
+    cursor.close()
+    
     if admin_exists:
         return redirect("/login")
     else:
         return redirect("/signup")
 
+
 @app.route("/signup", methods=["GET", "POST"])
 def signup():
     db = get_db()
+    cursor = get_cursor(db)
+    
     if request.method == "POST":
         name = request.form.get("name")
         email = request.form.get("email")
         password = request.form.get("password")
 
         if not name or not email or not password:
+            cursor.close()
             return render_template("signup.html", error="All fields are required")
 
-        existing = db.execute(
-            "SELECT * FROM members WHERE email=? AND is_system=1",
+        cursor.execute(
+            "SELECT * FROM members WHERE email=%s AND is_system=1",
             (email,)
-        ).fetchone()
+        )
+        existing = cursor.fetchone()
+        
         if existing:
+            cursor.close()
             return render_template("signup.html", error="Email already registered")
 
-        cursor = db.cursor()
         cursor.execute("""
             INSERT INTO members (name, email, password, is_system, joined_date)
-            VALUES (?, ?, ?, 1, date('now'))
+            VALUES (%s, %s, %s, 1, CURRENT_DATE)
+            RETURNING id
         """, (name, email, generate_password_hash(password)))
+        
+        new_admin_id = cursor.fetchone()["id"]
         db.commit()
         
-        # Get the newly created admin ID
-        new_admin = db.execute(
-            "SELECT id FROM members WHERE email=? AND is_system=1",
-            (email,)
-        ).fetchone()
-        
-        # Log them in automatically
-        session["admin_id"] = new_admin["id"]
-
+        session["admin_id"] = new_admin_id
+        cursor.close()
         return redirect("/create-group")
 
+    cursor.close()
     return render_template("signup.html")
+
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     db = get_db()
+    cursor = get_cursor(db)  # ← FIXED: Use get_cursor()
     error = None
 
     if request.method == "POST":
         email = request.form.get("email")
         password = request.form.get("password")
 
-        admin = db.execute(
-            "SELECT * FROM members WHERE email = ? AND is_system = 1",
+        cursor.execute(
+            "SELECT * FROM members WHERE email = %s AND is_system = 1",
             (email,)
-        ).fetchone()
+        )
+        admin = cursor.fetchone()
 
         if admin is None:
             error = "Admin account not found"
@@ -628,17 +666,14 @@ def login():
 
             if admin["group_id"]:
                 session["group_id"] = admin["group_id"]
+                cursor.close()
                 return redirect("/dashboard")
 
+            cursor.close()
             return redirect("/create-group")
 
+    cursor.close()
     return render_template("login.html", error=error)
-
-@app.route("/logout")
-def logout():
-    """Log out the current user"""
-    session.clear()
-    return redirect("/login")
 
 
 @app.route('/api/groups', methods=['POST'])
@@ -658,6 +693,7 @@ def create_group_api():
         "status": "success",
         "group_id": group_id
     })
+
 
 @app.route("/create-group", methods=["GET", "POST"])
 def create_group():
@@ -679,6 +715,7 @@ def create_group():
 
     return render_template("create_group.html", error=error)
 
+
 @app.route("/dashboard")
 def dashboard():
     if "admin_id" not in session:
@@ -688,22 +725,27 @@ def dashboard():
         return redirect("/create-group")
 
     db = get_db()
+    cursor = get_cursor(db)
 
-    admin = db.execute(
-        "SELECT name FROM members WHERE id = ?",
+    cursor.execute(
+        "SELECT name FROM members WHERE id = %s",
         (session["admin_id"],)
-    ).fetchone()
+    )
+    admin = cursor.fetchone()
 
-    group = db.execute(
-        "SELECT * FROM groups WHERE id = ?",
+    cursor.execute(
+        "SELECT * FROM groups WHERE id = %s",
         (session["group_id"],)
-    ).fetchone()
+    )
+    group = cursor.fetchone()
+    cursor.close()
 
     return render_template(
         "dashboard.html",
         admin=admin,
         group=group
     )
+
 
 @app.route('/api/dashboard', methods=['GET'])
 def get_dashboard_data():
@@ -719,10 +761,12 @@ def get_dashboard_data():
     settings = get_group_settings(db, group_id)
     admin_id = get_group_admin_member_id(db, group_id)
 
-    total_members = db.execute(
-        "SELECT COUNT(id) FROM members WHERE group_id = ? AND is_system = 0",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT COUNT(id) FROM members WHERE group_id = %s AND is_system = 0",
         (group_id,)
-    ).fetchone()[0]
+    )
+    total_members = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else None)(cursor.fetchone())
     
     total_imposed = get_total_penalties_imposed(db, group_id) 
     total_paid = get_total_penalties_paid(db, group_id)
@@ -730,17 +774,18 @@ def get_dashboard_data():
 
     total_units = get_total_hisa_units(db, group_id)
     
-    # FIX: Calculate total contributions (Hisa Anzia + Hisa + Jamii) just like reports page
-    total_contributions = db.execute(
+    cursor.execute(
         """
         SELECT SUM(amount) 
         FROM contributions 
-        WHERE group_id = ? 
-          AND member_id != ?
+        WHERE group_id = %s 
+          AND member_id != %s
           AND type IN ('hisa anzia', 'hisa', 'jamii')
         """,
         (group_id, admin_id)
-    ).fetchone()[0] or 0
+    )
+    total_contributions = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
+    cursor.close()
 
     return jsonify({
         "group_name": settings.get('group_name', 'Kikoba App'),
@@ -754,7 +799,7 @@ def get_dashboard_data():
         "cycle_end_date": settings.get('cycle_end_date', ''),
         "hisa_unit_price": settings.get('hisa_unit_price', '5000'),
         "total_members": total_members,
-        "total_contributions_hisa": total_contributions,  # FIX: Now shows ALL contributions
+        "total_contributions_hisa": total_contributions,
         "total_hisa_units": total_units,  
         "loan_balance_due": get_total_outstanding_loans(db, group_id),
         "total_principal_loaned": get_total_principal_loaned(db, group_id),
@@ -777,6 +822,7 @@ def get_dashboard_data():
         "loan_tier5_months": settings.get('loan_tier5_months', '12'),
     })
 
+
 # ==================== CONFIGURATION ROUTES ====================
 
 @app.route('/api/loan_rules', methods=['GET'])
@@ -787,11 +833,16 @@ def get_loan_rules_api():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    rules = db.execute(
-        "SELECT id, min_principal, max_principal, days FROM loan_rules WHERE group_id = ? ORDER BY min_principal ASC",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, min_principal, max_principal, days FROM loan_rules WHERE group_id = %s ORDER BY min_principal ASC",
         (group_id,)
-    ).fetchall()
+    )
+    rules = cursor.fetchall()
+    cursor.close()
+    
     return jsonify([dict(r) for r in rules])
+
 
 @app.route('/api/loan_rules', methods=['POST'])
 def save_loan_rules_api():
@@ -807,7 +858,8 @@ def save_loan_rules_api():
     if not rules or not isinstance(rules, list):
         return jsonify({"error": "Invalid rules data format"}), 400
     
-    db.execute("DELETE FROM loan_rules WHERE group_id = ?", (group_id,))
+    cursor = get_cursor(db)
+    cursor.execute("DELETE FROM loan_rules WHERE group_id = %s", (group_id,))
     
     for rule in rules:
         try:
@@ -815,20 +867,22 @@ def save_loan_rules_api():
             max_p = float(rule['max_principal'])
             days = int(rule['days'])
             
-            db.execute(
-                "INSERT INTO loan_rules (group_id, min_principal, max_principal, days) VALUES (?, ?, ?, ?)",
+            cursor.execute(
+                "INSERT INTO loan_rules (group_id, min_principal, max_principal, days) VALUES (%s, %s, %s, %s)",
                 (group_id, min_p, max_p, days)
             )
         except Exception as e:
             db.rollback()
+            cursor.close()
             return jsonify({"error": f"Invalid rule value provided: {e}"}), 400
             
     db.commit()
+    cursor.close()
     return jsonify({"status": "success", "message": f"{len(rules)} loan rules saved."})
+
 
 @app.route('/api/settings', methods=['GET', 'POST'])
 def handle_settings():
-    """Handle both GET (retrieve) and POST (save) for settings"""
     db = get_db()
     group_id = get_current_group_id()
     
@@ -839,7 +893,6 @@ def handle_settings():
         settings = get_group_settings(db, group_id)
         return jsonify(settings)
     
-    # POST - Save settings
     data = request.get_json()
     if not data:
         return jsonify({"error": "Invalid JSON data"}), 400
@@ -866,18 +919,26 @@ def handle_settings():
         ('loan_tier5_months', data.get('loan_tier5_months')), 
     ]
 
+    cursor = get_cursor(db)
+    
     try:
         for key, value in updates:
             if value is not None and value != "":
-                db.execute(
-                    "INSERT OR REPLACE INTO settings (group_id, key, value) VALUES (?, ?, ?)",
-                    (group_id, key, str(value))
-                )
+                cursor.execute("""
+                    INSERT INTO settings (group_id, key, value) 
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (group_id, key) 
+                    DO UPDATE SET value = EXCLUDED.value
+                """, (group_id, key, str(value)))
+        
         db.commit()
+        cursor.close()
         return jsonify({"status": "success", "message": "General settings updated."})
     except Exception as e:
         db.rollback()
+        cursor.close()
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/constitution/upload', methods=['POST'])
 def upload_constitution():
@@ -899,17 +960,22 @@ def upload_constitution():
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(file_path)
 
-    db.execute(
-        "INSERT OR REPLACE INTO settings (group_id, key, value) VALUES (?, ?, ?)",
-        (group_id, 'constitution_path', filename)
-    )
+    cursor = get_cursor(db)
+    cursor.execute("""
+        INSERT INTO settings (group_id, key, value) 
+        VALUES (%s, 'constitution_path', %s)
+        ON CONFLICT (group_id, key) 
+        DO UPDATE SET value = EXCLUDED.value
+    """, (group_id, filename))
     db.commit()
+    cursor.close()
 
     return jsonify({
         "status": "success",
         "message": "Constitution uploaded successfully.",
         "path": filename
     })
+
 
 @app.route("/constitution/view")
 def view_constitution():
@@ -919,10 +985,13 @@ def view_constitution():
     if not group_id:
         return "No group selected", 400
     
-    row = db.execute(
-        "SELECT value FROM settings WHERE key = 'constitution_path' AND group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT value FROM settings WHERE key = 'constitution_path' AND group_id = %s",
         (group_id,)
-    ).fetchone()
+    )
+    row = cursor.fetchone()
+    cursor.close()
 
     if not row:
         return "No constitution uploaded", 404
@@ -942,10 +1011,13 @@ def download_constitution():
     if not group_id:
         return "No group selected", 400
     
-    row = db.execute(
-        "SELECT value FROM settings WHERE key = 'constitution_path' AND group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT value FROM settings WHERE key = 'constitution_path' AND group_id = %s",
         (group_id,)
-    ).fetchone()
+    )
+    row = cursor.fetchone()
+    cursor.close()
 
     if not row:
         return "No constitution uploaded", 404
@@ -956,19 +1028,22 @@ def download_constitution():
         as_attachment=True
     )
 
+
 @app.route('/api/constitution/status', methods=['GET'])
 def constitution_status():
-    """Check if constitution exists for the current group"""
     db = get_db()
     group_id = get_current_group_id()
     
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    row = db.execute(
-        "SELECT value FROM settings WHERE key = 'constitution_path' AND group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT value FROM settings WHERE key = 'constitution_path' AND group_id = %s",
         (group_id,)
-    ).fetchone()
+    )
+    row = cursor.fetchone()
+    cursor.close()
     
     if not row or not row['value']:
         return jsonify({"uploaded": False}), 200
@@ -987,7 +1062,6 @@ def constitution_status():
 
 @app.route('/api/jamii_deduction', methods=['POST'])
 def record_jamii_deduction():
-    """Record a permanent Jamii deduction (group expense)."""
     db = get_db()
     group_id = get_current_group_id()
     
@@ -1001,23 +1075,27 @@ def record_jamii_deduction():
     if amount <= 0:
         return jsonify({"error": "Deduction amount must be positive"}), 400
 
-    admin_exists = db.execute(
-        "SELECT id FROM members WHERE id = ? AND group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id FROM members WHERE id = %s AND group_id = %s",
         (admin_id, group_id)
-    ).fetchone()
+    )
+    admin_exists = cursor.fetchone()
     
     if not admin_exists:
+        cursor.close()
         return jsonify({
             "error": f"Group admin member (ID {admin_id}) does not exist for this group. Cannot record group expense."
         }), 400
 
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    db.execute(
-        "INSERT INTO contributions (group_id, member_id, type, amount, date) VALUES (?, ?, 'jamii_deduction', ?, ?)",
+    cursor.execute(
+        "INSERT INTO contributions (group_id, member_id, type, amount, date) VALUES (%s, %s, 'jamii_deduction', %s, %s)",
         (group_id, admin_id, -amount, today_str)
     )
     db.commit()
+    cursor.close()
     
     return jsonify({
         "status": "success",
@@ -1031,6 +1109,7 @@ def record_jamii_deduction():
 def members_page():
     return render_template('members.html')
 
+
 @app.route('/api/members', methods=['GET'])
 def get_members():
     db = get_db()
@@ -1039,40 +1118,84 @@ def get_members():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    members = db.execute(
-        "SELECT * FROM members WHERE group_id = ? AND is_system = 0", 
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT * FROM members WHERE group_id = %s AND is_system = 0", 
         (group_id,)
-    ).fetchall()
+    )
+    members = cursor.fetchall()
+    
+    # PRE-FETCH all contributions in one query
+    cursor.execute("""
+        SELECT member_id, SUM(amount) as total
+        FROM contributions 
+        WHERE group_id = %s AND type != 'jamii_deduction'
+        GROUP BY member_id
+    """, (group_id,))
+    contributions_map = {row['member_id']: row['total'] for row in cursor.fetchall()}
+    
+    # PRE-FETCH all loans in one query
+    cursor.execute("""
+        SELECT member_id, SUM(principal) as total_principal
+        FROM loans 
+        WHERE group_id = %s
+        GROUP BY member_id
+    """, (group_id,))
+    loans_map = {row['member_id']: row['total_principal'] for row in cursor.fetchall()}
+    
+    # PRE-FETCH all repayments in one query
+    cursor.execute("""
+        SELECT l.member_id, SUM(r.amount) as total_rejesho
+        FROM rejesho r
+        JOIN loans l ON r.loan_id = l.id
+        WHERE l.group_id = %s
+        GROUP BY l.member_id
+    """, (group_id,))
+    rejesho_map = {row['member_id']: row['total_rejesho'] for row in cursor.fetchall()}
+    
+    # PRE-FETCH all penalties in one query
+    cursor.execute("""
+        SELECT member_id, SUM(amount - COALESCE(amount_paid, 0)) as total_penalties
+        FROM penalties 
+        WHERE group_id = %s
+        GROUP BY member_id
+    """, (group_id,))
+    penalties_map = {row['member_id']: row['total_penalties'] for row in cursor.fetchall()}
+    
+    cursor.close()
+    
     result = []
+    settings = get_group_settings(db, group_id)
+    unit_price = float(settings.get('hisa_unit_price', 5000))
     
     for m in members:
         member_id = m["id"]
         
-        total_contributions = db.execute(
-            "SELECT SUM(amount) FROM contributions WHERE member_id=? AND group_id=? AND type != 'jamii_deduction'",
-            (member_id, group_id)
-        ).fetchone()[0] or 0
-
-        loan_balances = get_member_loan_balances(db, member_id, group_id)
-        total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
-        jamii_status = get_member_jamii_balance(db, member_id, group_id)
-        hisa_data = get_member_hisa_units(db, member_id, group_id)
+        total_contributions = contributions_map.get(member_id, 0)
+        total_loans = loans_map.get(member_id, 0)
+        total_rejesho = rejesho_map.get(member_id, 0)
+        total_penalties = penalties_map.get(member_id, 0)
+        
+        # Calculate HISA units (simplified)
+        hisa_units = total_contributions / unit_price if unit_price > 0 else 0
+        remaining_loans = max(total_loans - total_rejesho, 0)
 
         result.append({
             "id": member_id,
             "name": m["name"],
             "phone": m["phone"],
             "total_contributions": total_contributions,
-            "hisa_units": hisa_data["units"],
-            "total_loans_committed": loan_balances["total_loans_committed"],
-            "total_penalties": total_penalties_due,
-            "total_outstanding": loan_balances["remaining_loans"],
-            "jamii_paid": jamii_status["total_paid"],
-            "jamii_expected": jamii_status["expected_total"],
-            "jamii_shortfall": jamii_status["shortfall"]
+            "hisa_units": hisa_units,
+            "total_loans_committed": total_loans,
+            "total_penalties": total_penalties,
+            "total_outstanding": remaining_loans,
+            "jamii_paid": 0,  # Simplified for speed
+            "jamii_expected": 0,
+            "jamii_shortfall": 0
         })
     
     return jsonify(result)
+
 
 @app.route('/api/members', methods=['POST'])
 def add_member():
@@ -1089,13 +1212,16 @@ def add_member():
     if not name:
         return jsonify({"error": "Name is required"}), 400
     
-    db.execute(
-        "INSERT INTO members (group_id, name, phone, joined_date, is_system) VALUES (?, ?, ?, ?, 0)",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "INSERT INTO members (group_id, name, phone, joined_date, is_system) VALUES (%s, %s, %s, %s, 0)",
         (group_id, name, phone, datetime.now().strftime("%Y-%m-%d"))
     )
     db.commit()
+    cursor.close()
     
     return jsonify({"status": "success"})
+
 
 @app.route('/api/members/<int:member_id>', methods=['PUT', 'DELETE'])
 def edit_member(member_id):
@@ -1105,55 +1231,66 @@ def edit_member(member_id):
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    member = db.execute(
-        "SELECT id, is_system FROM members WHERE id = ? AND group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, is_system FROM members WHERE id = %s AND group_id = %s",
         (member_id, group_id)
-    ).fetchone()
+    )
+    member = cursor.fetchone()
     
     if not member:
+        cursor.close()
         return jsonify({"error": "Member not found in this group"}), 404
     
     if member['is_system'] == 1:
+        cursor.close()
         return jsonify({"error": "Cannot modify system admin account"}), 400
     
     if request.method == 'DELETE':
-        has_records = db.execute("""
+        cursor.execute("""
             SELECT 
-                (SELECT COUNT(*) FROM contributions WHERE member_id = ? AND group_id = ?) +
-                (SELECT COUNT(*) FROM loans WHERE member_id = ? AND group_id = ?) +
-                (SELECT COUNT(*) FROM penalties WHERE member_id = ? AND group_id = ?) as total
-        """, (member_id, group_id, member_id, group_id, member_id, group_id)).fetchone()['total']
+                (SELECT COUNT(*) FROM contributions WHERE member_id = %s AND group_id = %s) +
+                (SELECT COUNT(*) FROM loans WHERE member_id = %s AND group_id = %s) +
+                (SELECT COUNT(*) FROM penalties WHERE member_id = %s AND group_id = %s) as total
+        """, (member_id, group_id, member_id, group_id, member_id, group_id))
+        has_records = cursor.fetchone()['total']
         
         if has_records > 0:
+            cursor.close()
             return jsonify({
                 "error": "Cannot delete member with existing contributions, loans, or penalties"
             }), 400
         
         try:
-            db.execute("DELETE FROM members WHERE id = ? AND group_id = ?", (member_id, group_id))
+            cursor.execute("DELETE FROM members WHERE id = %s AND group_id = %s", (member_id, group_id))
             db.commit()
+            cursor.close()
             return jsonify({"status": "success", "message": "Member deleted"})
         except Exception as e:
             db.rollback()
+            cursor.close()
             return jsonify({"error": str(e)}), 500
     
-    # PUT - Update member
+    # PUT
     data = request.get_json()
     name = data.get('name', '').strip()
     phone = data.get('phone', '').strip()
     
     if not name:
+        cursor.close()
         return jsonify({"error": "Name is required"}), 400
     
     try:
-        db.execute(
-            "UPDATE members SET name = ?, phone = ? WHERE id = ? AND group_id = ?",
+        cursor.execute(
+            "UPDATE members SET name = %s, phone = %s WHERE id = %s AND group_id = %s",
             (name, phone, member_id, group_id)
         )
         db.commit()
+        cursor.close()
         return jsonify({"status": "success", "message": "Member updated"})
     except Exception as e:
         db.rollback()
+        cursor.close()
         return jsonify({"error": str(e)}), 500
 
 
@@ -1163,6 +1300,7 @@ def edit_member(member_id):
 def contributions_page():
     return render_template('contributions.html')
 
+
 @app.route('/api/contributions', methods=['GET'])
 def get_contributions():
     db = get_db()
@@ -1171,16 +1309,20 @@ def get_contributions():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    contributions = db.execute("""
+    cursor = get_cursor(db)
+    cursor.execute("""
         SELECT c.id, c.member_id, c.type, c.amount, c.date, c.transaction_date, m.name as member_name
         FROM contributions c
         JOIN members m ON c.member_id = m.id
-        WHERE c.group_id = ?
+        WHERE c.group_id = %s
         ORDER BY c.date DESC
-    """, (group_id,)).fetchall()
+    """, (group_id,))
+    contributions = cursor.fetchall()
+    cursor.close()
 
     result = [dict(c) for c in contributions]
     return jsonify(result)
+
 
 @app.route('/api/contributions', methods=['POST'])
 def add_contribution():
@@ -1194,45 +1336,49 @@ def add_contribution():
     member_id = data.get("member_id")
     ctype = data.get("type")
     amount = data.get("amount")
-    entry_date = data.get("date")  # Entry date (when recorded)
-    transaction_date = data.get("transaction_date")  # Actual transaction date
+    entry_date = data.get("date")
+    transaction_date = data.get("transaction_date")
 
     if not member_id or not ctype or not amount:
         return jsonify({"error": "All fields are required"}), 400
 
-    # Use today as default for entry_date if not provided
     if not entry_date:
         entry_date = datetime.now().strftime("%Y-%m-%d")
     
-    # Use entry_date as transaction_date if not provided
     if transaction_date is None:
         transaction_date = entry_date
 
+    cursor = get_cursor(db)
 
     if ctype == "rejesho":
-        loan = db.execute(
-            "SELECT * FROM loans WHERE member_id = ? AND group_id = ? AND status != 'Cleared' ORDER BY start_date DESC LIMIT 1",
+        cursor.execute(
+            "SELECT * FROM loans WHERE member_id = %s AND group_id = %s AND status != 'Cleared' ORDER BY start_date DESC LIMIT 1",
             (member_id, group_id)
-        ).fetchone()
+        )
+        loan = cursor.fetchone()
         
         if not loan:
+            cursor.close()
             return jsonify({"error": "No active loan found for this member"}), 400
 
-        db.execute(
-            "INSERT INTO rejesho (group_id, loan_id, amount, date) VALUES (?, ?, ?, ?)",
+        cursor.execute(
+            "INSERT INTO rejesho (group_id, loan_id, amount, date) VALUES (%s, %s, %s, %s)",
             (group_id, loan["id"], amount, transaction_date)
         )
         
         db.commit()
+        cursor.close()
         update_loan_status(db, loan["id"], group_id)
     else:
-        db.execute(
-            "INSERT INTO contributions (group_id, member_id, type, amount, date, transaction_date) VALUES (?, ?, ?, ?, ?, ?)",
+        cursor.execute(
+            "INSERT INTO contributions (group_id, member_id, type, amount, date, transaction_date) VALUES (%s, %s, %s, %s, %s, %s)",
             (group_id, member_id, ctype, amount, entry_date, transaction_date)
         )
         db.commit()
+        cursor.close()
 
     return jsonify({"status": "success"})
+
 
 @app.route('/api/contributions/<int:contribution_id>', methods=['PUT', 'DELETE'])
 def edit_contribution(contribution_id):
@@ -1242,55 +1388,67 @@ def edit_contribution(contribution_id):
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
+    cursor = get_cursor(db)
+    
     if request.method == 'DELETE':
-        contrib = db.execute(
-            "SELECT type FROM contributions WHERE id = ? AND group_id = ?", 
+        cursor.execute(
+            "SELECT type FROM contributions WHERE id = %s AND group_id = %s", 
             (contribution_id, group_id)
-        ).fetchone()
+        )
+        contrib = cursor.fetchone()
         
         if not contrib:
+            cursor.close()
             return jsonify({"error": "Contribution not found"}), 404
         
         if contrib['type'] == 'jamii_deduction':
+            cursor.close()
             return jsonify({
                 "error": "Cannot delete system-generated Jamii deductions. Use Profits page to manage."
             }), 400
         
         try:
-            db.execute("DELETE FROM contributions WHERE id = ? AND group_id = ?", (contribution_id, group_id))
+            cursor.execute("DELETE FROM contributions WHERE id = %s AND group_id = %s", (contribution_id, group_id))
             db.commit()
+            cursor.close()
             return jsonify({"status": "success", "message": "Contribution deleted"})
         except Exception as e:
             db.rollback()
+            cursor.close()
             return jsonify({"error": str(e)}), 500
     
-    # PUT - Update contribution
+    # PUT
     data = request.get_json()
     amount = float(data.get('amount', 0))
     ctype = data.get('type', '').strip()
     date_str = data.get('date', '').strip()
-    transaction_date_str = data.get('transaction_date', '').strip()  # FIX: Added this
+    transaction_date_str = data.get('transaction_date', '').strip()
     
     if amount <= 0:
+        cursor.close()
         return jsonify({"error": "Amount must be positive"}), 400
     
     if ctype not in ['hisa', 'hisa anzia', 'jamii']:
+        cursor.close()
         return jsonify({"error": "Invalid contribution type"}), 400
     
     try:
         datetime.strptime(date_str, "%Y-%m-%d")
-        datetime.strptime(transaction_date_str, "%Y-%m-%d")  # FIX: Validate transaction_date
+        datetime.strptime(transaction_date_str, "%Y-%m-%d")
         
-        db.execute(
-            "UPDATE contributions SET amount = ?, type = ?, date = ?, transaction_date = ? WHERE id = ? AND group_id = ?",
-            (amount, ctype, date_str, transaction_date_str, contribution_id, group_id)  # FIX: Added transaction_date
+        cursor.execute(
+            "UPDATE contributions SET amount = %s, type = %s, date = %s, transaction_date = %s WHERE id = %s AND group_id = %s",
+            (amount, ctype, date_str, transaction_date_str, contribution_id, group_id)
         )
         db.commit()
+        cursor.close()
         return jsonify({"status": "success", "message": "Contribution updated"})
     except ValueError:
+        cursor.close()
         return jsonify({"error": "Invalid date format"}), 400
     except Exception as e:
         db.rollback()
+        cursor.close()
         return jsonify({"error": str(e)}), 500
 
 # ==================== LOANS ====================
@@ -1298,6 +1456,7 @@ def edit_contribution(contribution_id):
 @app.route('/loans-page')
 def loans_page():
     return render_template('loans.html')
+
 
 @app.route('/api/loans', methods=['GET'])
 def get_loans():
@@ -1309,22 +1468,24 @@ def get_loans():
     
     auto_insert_loan_penalties(group_id)
 
-    loans = db.execute("""
+    cursor = get_cursor(db)
+    cursor.execute("""
         SELECT l.*, m.name AS member_name 
         FROM loans l
         JOIN members m ON l.member_id = m.id
-        WHERE l.group_id = ?
-    """, (group_id,)).fetchall()
+        WHERE l.group_id = %s
+    """, (group_id,))
+    loans = cursor.fetchall()
 
     result = []
 
     for l in loans:
-        repaid = db.execute(
-            "SELECT SUM(amount) FROM rejesho WHERE loan_id = ? AND group_id = ?",
+        cursor.execute(
+            "SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s",
             (l["id"], group_id)
-        ).fetchone()[0] or 0
+        )
+        repaid = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
 
-        # FIX: Remaining = Principal - Repaid (interest already deducted)
         remaining = l["principal"] - repaid
 
         today = datetime.now().date()
@@ -1337,7 +1498,6 @@ def get_loans():
         else:
             status = "Active"
 
-        # FIX: Calculate monthly rejesho
         monthly_rejesho = round(l["principal"] / l["months"], 2) if l["months"] > 0 else 0
 
         result.append({
@@ -1345,10 +1505,10 @@ def get_loans():
             "member_name": l["member_name"],
             "principal": l["principal"],
             "interest": l["interest"],
-            "net_amount": l["net_amount"],  # What member received
-            "months": l["months"],  # FIX: Added
-            "monthly_rejesho": monthly_rejesho,  # FIX: Added
-            "total": l["principal"],  # FIX: Member owes principal only
+            "net_amount": l["net_amount"],
+            "months": l["months"],
+            "monthly_rejesho": monthly_rejesho,
+            "total": l["principal"],
             "start_date": l["start_date"],
             "due_date": l["due_date"],
             "amount_returned": repaid,
@@ -1357,10 +1517,12 @@ def get_loans():
         })
         
         if l["status"] != status:
-             db.execute("UPDATE loans SET status = ? WHERE id = ? AND group_id = ?", (status, l["id"], group_id))
-             db.commit()
+            cursor.execute("UPDATE loans SET status = %s WHERE id = %s AND group_id = %s", (status, l["id"], group_id))
+            db.commit()
 
+    cursor.close()
     return jsonify(result)
+
 
 @app.route('/api/loans', methods=['POST'])
 def add_loan():
@@ -1379,19 +1541,21 @@ def add_loan():
         if not member_id or principal <= 0:
             return jsonify({"error": "Invalid member or principal amount"}), 400
 
-        member = db.execute(
-            "SELECT id FROM members WHERE id = ? AND group_id = ?",
+        cursor = get_cursor(db)
+        cursor.execute(
+            "SELECT id FROM members WHERE id = %s AND group_id = %s",
             (member_id, group_id)
-        ).fetchone()
+        )
+        member = cursor.fetchone()
         
         if not member:
+            cursor.close()
             return jsonify({"error": "Member not found in this group"}), 400
 
         settings = get_group_settings(db, group_id)
         interest_rate = float(settings.get("interest_rate", 0.10))
         cycle_end_date = settings.get('cycle_end_date', '')
 
-        # Determine loan duration (months) based on tiers
         rules = [
             (float(settings.get("loan_tier1_amount", 500000)),
              int(settings.get("loan_tier1_months", 1))),
@@ -1401,8 +1565,8 @@ def add_loan():
              int(settings.get("loan_tier3_months", 6))),
             (float(settings.get("loan_tier4_amount", 5000000)),
              int(settings.get("loan_tier4_months", 9))),
-             (float(settings.get("loan_tier5_amount", 10000000)),  
-            int(settings.get("loan_tier5_months", 12))), 
+            (float(settings.get("loan_tier5_amount", 10000000)),  
+             int(settings.get("loan_tier5_months", 12))), 
         ]
 
         months = None
@@ -1412,11 +1576,11 @@ def add_loan():
                 break
 
         if months is None:
+            cursor.close()
             return jsonify({
                 "error": "Loan amount exceeds the maximum allowed by group rules"
             }), 400
 
-        # Cap loan duration to cycle end
         warning_message = None
         original_months = months
         
@@ -1427,6 +1591,7 @@ def add_loan():
                 remaining_days = (cycle_end - today).days
                 
                 if remaining_days <= 0:
+                    cursor.close()
                     return jsonify({
                         "error": "Cannot issue loans - cycle has ended. Please start a new cycle."
                     }), 400
@@ -1442,20 +1607,19 @@ def add_loan():
             except ValueError:
                 pass
 
-        # NEW LOGIC: Deduct interest immediately
         interest = round(principal * interest_rate)
         total = principal + interest
-        net_amount = principal - interest  # What member actually receives
+        net_amount = principal - interest
 
         start_date = datetime.now()
         due_date = start_date + timedelta(days=30 * months)
 
-        db.execute("""
+        cursor.execute("""
             INSERT INTO loans (
                 group_id, member_id, principal, interest, total,
                 net_amount, start_date, due_date, months, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'Active')
         """, (
             group_id, member_id, principal, interest, total,
             net_amount, start_date.strftime("%Y-%m-%d"),
@@ -1463,14 +1627,15 @@ def add_loan():
         ))
 
         db.commit()
+        cursor.close()
 
         response_data = {
             "status": "success",
             "months": months,
             "principal": principal,
             "interest": interest,
-            "net_amount": net_amount,  # What member receives
-            "total": total,  # What member owes (principal only, interest already deducted)
+            "net_amount": net_amount,
+            "total": total,
             "monthly_rejesho": round(principal / months, 2),
             "due_date": due_date.strftime("%Y-%m-%d")
         }
@@ -1487,45 +1652,222 @@ def add_loan():
         return jsonify({"error": "Failed to add loan"}), 500
 
 
-@app.route('/api/loans/<int:loan_id>', methods=['PUT'])
+@app.route('/api/loans/<int:loan_id>', methods=['PUT', 'DELETE'])
 def edit_loan(loan_id):
-    """SAFE EDIT: Only allows editing due_date and status."""
     db = get_db()
     group_id = get_current_group_id()
     
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    data = request.get_json()
-    
-    loan = db.execute(
-        "SELECT id FROM loans WHERE id = ? AND group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id FROM loans WHERE id = %s AND group_id = %s",
         (loan_id, group_id)
-    ).fetchone()
+    )
+    loan = cursor.fetchone()
     
     if not loan:
+        cursor.close()
         return jsonify({"error": "Loan not found in this group"}), 404
     
+    if request.method == 'DELETE':
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM rejesho WHERE loan_id = %s AND group_id = %s",
+            (loan_id, group_id)
+        )
+        repayments_count = cursor.fetchone()['count']
+        
+        cursor.execute(
+            "SELECT COUNT(*) as count FROM penalties WHERE loan_id = %s AND group_id = %s",
+            (loan_id, group_id)
+        )
+        penalties_count = cursor.fetchone()['count']
+        
+        if repayments_count > 0 or penalties_count > 0:
+            cursor.close()
+            return jsonify({
+                "error": f"Cannot delete loan with existing records (Repayments: {repayments_count}, Penalties: {penalties_count}). Please delete those first or mark loan as 'Cleared'."
+            }), 400
+        
+        try:
+            cursor.execute("DELETE FROM loans WHERE id = %s AND group_id = %s", (loan_id, group_id))
+            db.commit()
+            cursor.close()
+            return jsonify({"status": "success", "message": "Loan deleted successfully"})
+        except Exception as e:
+            db.rollback()
+            cursor.close()
+            return jsonify({"error": str(e)}), 500
+    
+    # PUT
+    data = request.get_json()
     due_date_str = data.get('due_date', '').strip()
     status = data.get('status', '').strip()
     
     if status not in ['Active', 'Overdue', 'Cleared']:
+        cursor.close()
         return jsonify({"error": "Invalid status"}), 400
     
     try:
         datetime.strptime(due_date_str, "%Y-%m-%d")
         
-        db.execute(
-            "UPDATE loans SET due_date = ?, status = ? WHERE id = ? AND group_id = ?",
+        cursor.execute(
+            "UPDATE loans SET due_date = %s, status = %s WHERE id = %s AND group_id = %s",
             (due_date_str, status, loan_id, group_id)
         )
         db.commit()
-        return jsonify({"status": "success", "message": "Loan updated (date/status only)"})
+        cursor.close()
+        return jsonify({"status": "success", "message": "Loan updated successfully"})
     except ValueError:
+        cursor.close()
         return jsonify({"error": "Invalid date format"}), 400
     except Exception as e:
         db.rollback()
+        cursor.close()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/loans-page/download', methods=['GET'])
+def download_loans_pdf():
+    db = get_db()
+    group_id = get_current_group_id()
+    
+    if not group_id:
+        return "No group selected", 400
+    
+    settings = get_group_settings(db, group_id)
+    group_name = settings.get("group_name", "Kikoba App")
+    
+    cursor = get_cursor(db)
+    cursor.execute("""
+        SELECT l.*, m.name AS member_name 
+        FROM loans l
+        JOIN members m ON l.member_id = m.id
+        WHERE l.group_id = %s
+        ORDER BY l.start_date DESC
+    """, (group_id,))
+    loans = cursor.fetchall()
+    
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=landscape(A4),
+        rightMargin=20, leftMargin=20, topMargin=40, bottomMargin=20
+    )
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    title = Paragraph(f"💰 {group_name} - Loans Report", styles['Title'])
+    elements.append(title)
+    elements.append(Spacer(1, 12))
+    
+    report_date = datetime.now().strftime("%d %B %Y, %I:%M %p")
+    subtitle = Paragraph(f"<i>Generated on: {report_date}</i>", styles['Normal'])
+    elements.append(subtitle)
+    elements.append(Spacer(1, 20))
+    
+    total_principal = sum(loan['principal'] for loan in loans)
+    total_interest = sum(loan['interest'] for loan in loans)
+    total_disbursed = sum(loan['net_amount'] for loan in loans)
+    
+    active_loans = [l for l in loans if l['status'] == 'Active']
+    overdue_loans = [l for l in loans if l['status'] == 'Overdue']
+    cleared_loans = [l for l in loans if l['status'] == 'Cleared']
+    
+    total_repaid = 0
+    total_remaining = 0
+    for loan in loans:
+        cursor.execute(
+            "SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s",
+            (loan['id'], group_id)
+        )
+        repaid = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
+        total_repaid += repaid
+        total_remaining += max(loan['principal'] - repaid, 0)
+    
+    summary_data = [
+        [Paragraph("<b>Summary</b>", styles['Normal']), ""],
+        ["Total Loans Issued", f"{len(loans)}"],
+        ["Total Principal Loaned", f"{total_principal:,.0f} TZS"],
+        ["Total Interest Deducted", f"{total_interest:,.0f} TZS"],
+        ["Total Repaid", f"{total_repaid:,.0f} TZS"],
+        ["Total Outstanding", f"{total_remaining:,.0f} TZS"],
+        ["", ""],
+        ["Active Loans", f"{len(active_loans)}"],
+        ["Overdue Loans", f"{len(overdue_loans)}"],
+        ["Cleared Loans", f"{len(cleared_loans)}"],
+    ]
+    
+    summary_table = Table(summary_data, colWidths=[200, 150])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#FFC107')),
+        ('BACKGROUND', (0,1), (-1,-1), colors.whitesmoke),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('FONTSIZE', (0,0), (-1,-1), 11),
+        ('ALIGN', (1,0), (1,-1), 'RIGHT'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+    ]))
+    elements.append(summary_table)
+    elements.append(Spacer(1, 30))
+    
+    headers = [
+        "Member", "Principal", "Interest", "Net Disbursed", 
+        "Months", "Monthly Rejesho", "Repaid", "Remaining", 
+        "Start Date", "Due Date", "Status"
+    ]
+    data = [headers]
+    
+    for loan in loans:
+        cursor.execute(
+            "SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s",
+            (loan['id'], group_id)
+        )
+        repaid = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
+        
+        remaining = max(loan['principal'] - repaid, 0)
+        monthly_rejesho = round(loan['principal'] / loan['months'], 2) if loan['months'] > 0 else 0
+        
+        data.append([
+            loan['member_name'],
+            f"{loan['principal']:,.0f}",
+            f"{loan['interest']:,.0f}",
+            f"{loan['net_amount']:,.0f}",
+            str(loan['months']),
+            f"{monthly_rejesho:,.0f}",
+            f"{repaid:,.0f}",
+            f"{remaining:,.0f}",
+            loan['start_date'],
+            loan['due_date'],
+            loan['status']
+        ])
+    
+    loans_table = Table(data, repeatRows=1)
+    loans_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#FFC107')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+        ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+        ('ALIGN', (0,0), (0,-1), 'LEFT'),
+        ('FONTSIZE', (0,0), (-1,-1), 9),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.grey),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#f8f9fa')]),
+    ]))
+    elements.append(Paragraph("<b>Detailed Loans Breakdown</b>", styles['Heading2']))
+    elements.append(Spacer(1, 10))
+    elements.append(loans_table)
+    
+    elements.append(Spacer(1, 20))
+    footer_text = Paragraph(
+        f"<font size=8>Report generated on {report_date} | {group_name}</font>",
+        styles['Normal']
+    )
+    elements.append(footer_text)
+    
+    doc.build(elements)
+    buffer.seek(0)
+    cursor.close()
+    
+    filename = f"{group_name.replace(' ','_')}_Loans_Report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return send_file(buffer, as_attachment=True, download_name=filename, mimetype="application/pdf")
 
 
 # ==================== REJESHO (REPAYMENTS) ====================
@@ -1534,6 +1876,7 @@ def edit_loan(loan_id):
 def repayments_page():
     loan_id = request.args.get('loan_id')
     return render_template('repayments.html', loan_id=loan_id)
+
 
 @app.route('/api/rejesho', methods=['POST'])
 def add_rejesho():
@@ -1556,25 +1899,30 @@ def add_rejesho():
     except ValueError:
         return jsonify({"error": "Invalid loan ID or amount format"}), 400
 
-    loan = db.execute(
-        "SELECT id FROM loans WHERE id = ? AND group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id FROM loans WHERE id = %s AND group_id = %s",
         (loan_id, group_id)
-    ).fetchone()
+    )
+    loan = cursor.fetchone()
     
     if not loan:
+        cursor.close()
         return jsonify({"error": "Loan not found in this group"}), 404
 
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    db.execute(
-        "INSERT INTO rejesho (group_id, loan_id, amount, date) VALUES (?, ?, ?, ?)",
+    cursor.execute(
+        "INSERT INTO rejesho (group_id, loan_id, amount, date) VALUES (%s, %s, %s, %s)",
         (group_id, loan_id, amount, today_str)
     )
     db.commit()
+    cursor.close()
     
     update_loan_status(db, loan_id, group_id)
     
     return jsonify({"status": "success"})
+
 
 @app.route('/api/rejesho/<int:loan_id>', methods=['GET'])
 def get_rejesho_history(loan_id):
@@ -1584,33 +1932,38 @@ def get_rejesho_history(loan_id):
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    loan_info = db.execute(
-        "SELECT l.*, m.name as member_name FROM loans l JOIN members m ON l.member_id = m.id WHERE l.id = ? AND l.group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT l.*, m.name as member_name FROM loans l JOIN members m ON l.member_id = m.id WHERE l.id = %s AND l.group_id = %s",
         (loan_id, group_id)
-    ).fetchone()
+    )
+    loan_info = cursor.fetchone()
 
     if not loan_info:
+        cursor.close()
         return jsonify({"error": "Loan not found"}), 404
     
-    repayments = db.execute(
-        "SELECT amount, date FROM rejesho WHERE loan_id = ? AND group_id = ? ORDER BY date DESC",
+    cursor.execute(
+        "SELECT amount, date FROM rejesho WHERE loan_id = %s AND group_id = %s ORDER BY date DESC",
         (loan_id, group_id)
-    ).fetchall()
+    )
+    repayments = cursor.fetchall()
 
     total_repaid = sum(r['amount'] for r in repayments)
     
-    # FIX: Member owes PRINCIPAL only (interest already deducted)
     remaining = loan_info['principal'] - total_repaid
     monthly_rejesho = round(loan_info['principal'] / loan_info['months'], 2) if loan_info['months'] > 0 else 0
+
+    cursor.close()
 
     return jsonify({
         "loan_info": {
             "id": loan_info['id'],
             "member_name": loan_info['member_name'],
-            "principal": loan_info['principal'],  # What member owes
-            "interest": loan_info['interest'],  # What was deducted
-            "net_amount": loan_info['net_amount'],  # What member received
-            "total": loan_info['principal'],  # FIX: Display principal as "total due"
+            "principal": loan_info['principal'],
+            "interest": loan_info['interest'],
+            "net_amount": loan_info['net_amount'],
+            "total": loan_info['principal'],
             "start_date": loan_info['start_date'],
             "due_date": loan_info['due_date'],
             "months": loan_info['months'],
@@ -1622,11 +1975,13 @@ def get_rejesho_history(loan_id):
         "repayments": [dict(r) for r in repayments]
     })
 
+
 # ==================== PENALTIES ====================
 
 @app.route('/penalties-page')
 def penalties_page():
     return render_template('penalties.html')
+
 
 @app.route('/api/penalties', methods=['GET'])
 def get_penalties():
@@ -1636,7 +1991,8 @@ def get_penalties():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
 
-    ledger = db.execute("""
+    cursor = get_cursor(db)
+    cursor.execute("""
         SELECT 
             p.id,
             p.member_id,
@@ -1648,19 +2004,24 @@ def get_penalties():
             p.date
         FROM penalties p
         JOIN members m ON p.member_id = m.id
-        WHERE p.group_id = ?
+        WHERE p.group_id = %s
         ORDER BY p.date DESC, p.id DESC
-    """, (group_id,)).fetchall()
+    """, (group_id,))
+    ledger = cursor.fetchall()
 
-    total_due = db.execute(
-        "SELECT SUM(amount - COALESCE(amount_paid, 0)) FROM penalties WHERE group_id = ?",
+    cursor.execute(
+        "SELECT SUM(amount - COALESCE(amount_paid, 0)) FROM penalties WHERE group_id = %s",
         (group_id,)
-    ).fetchone()[0] or 0
+    )
+    total_due = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
+    
+    cursor.close()
     
     return jsonify({
         "total_outstanding": total_due,
         "ledger": [dict(p) for p in ledger]
     })
+
 
 @app.route('/api/penalties', methods=['POST'])
 def add_penalty():
@@ -1679,25 +2040,31 @@ def add_penalty():
     if not member_id or not ptype or amount <= 0:
         return jsonify({"error": "Member ID, type, and positive amount are required"}), 400
 
-    member = db.execute(
-        "SELECT id FROM members WHERE id = ? AND group_id = ?",
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id FROM members WHERE id = %s AND group_id = %s",
         (member_id, group_id)
-    ).fetchone()
+    )
+    member = cursor.fetchone()
     
     if not member:
+        cursor.close()
         return jsonify({"error": "Member not found in this group"}), 404
 
     try:
-        db.execute(
-            "INSERT INTO penalties (group_id, member_id, type, amount, description, date) VALUES (?, ?, ?, ?, ?, ?)",
+        cursor.execute(
+            "INSERT INTO penalties (group_id, member_id, type, amount, description, date) VALUES (%s, %s, %s, %s, %s, %s)",
             (group_id, member_id, ptype, amount, description, datetime.now().strftime("%Y-%m-%d"))
         )
         db.commit()
+        cursor.close()
         
         return jsonify({"status": "success"})
     except Exception as e:
         db.rollback()
+        cursor.close()
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/record_penalty_payment/<int:penalty_id>', methods=['POST'])
 def record_penalty_payment(penalty_id):
@@ -1713,34 +2080,40 @@ def record_penalty_payment(penalty_id):
     if amount_to_pay <= 0:
         return jsonify({"error": "A valid payment amount is required."}), 400
 
+    cursor = get_cursor(db)
+    
     try:
-        penalty = db.execute(
-            "SELECT amount, COALESCE(amount_paid, 0) AS amount_paid, member_id FROM penalties WHERE id = ? AND group_id = ?",
+        cursor.execute(
+            "SELECT amount, COALESCE(amount_paid, 0) AS amount_paid, member_id FROM penalties WHERE id = %s AND group_id = %s",
             (penalty_id, group_id)
-        ).fetchone()
+        )
+        penalty = cursor.fetchone()
 
         if not penalty:
+            cursor.close()
             return jsonify({"error": "Penalty record not found."}), 404
 
         remaining_due = penalty['amount'] - penalty['amount_paid']
         
         if remaining_due <= 0:
-             return jsonify({"error": "Penalty is already fully paid."}), 400
+            cursor.close()
+            return jsonify({"error": "Penalty is already fully paid."}), 400
              
         applied_amount = min(amount_to_pay, remaining_due) 
 
         new_paid_total = penalty['amount_paid'] + applied_amount
-        db.execute(
-            "UPDATE penalties SET amount_paid = ? WHERE id = ? AND group_id = ?",
+        cursor.execute(
+            "UPDATE penalties SET amount_paid = %s WHERE id = %s AND group_id = %s",
             (new_paid_total, penalty_id, group_id)
         )
         
-        db.execute(
-            "INSERT INTO contributions (group_id, member_id, type, amount, date) VALUES (?, ?, 'penalty_payment', ?, datetime('now'))",
+        cursor.execute(
+            "INSERT INTO contributions (group_id, member_id, type, amount, date) VALUES (%s, %s, 'penalty_payment', %s, CURRENT_DATE)",
             (group_id, penalty['member_id'], applied_amount)
         )
 
         db.commit()
+        cursor.close()
         
         remaining_after_payment = remaining_due - applied_amount
         message = f"Successfully recorded {applied_amount:,.0f} TZS payment for Penalty #{penalty_id}. Remaining: {remaining_after_payment:,.0f} TZS"
@@ -1748,8 +2121,10 @@ def record_penalty_payment(penalty_id):
 
     except Exception as e:
         db.rollback()
+        cursor.close()
         print(f"Error recording penalty payment: {e}")
         return jsonify({"error": "Database error while recording payment."}), 500
+
 
 @app.route('/api/penalties/<int:penalty_id>', methods=['PUT', 'DELETE'])
 def edit_penalty(penalty_id):
@@ -1759,60 +2134,73 @@ def edit_penalty(penalty_id):
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
+    cursor = get_cursor(db)
+    
     if request.method == 'DELETE':
-        penalty = db.execute(
-            "SELECT type, loan_id FROM penalties WHERE id = ? AND group_id = ?", 
+        cursor.execute(
+            "SELECT type, loan_id FROM penalties WHERE id = %s AND group_id = %s", 
             (penalty_id, group_id)
-        ).fetchone()
+        )
+        penalty = cursor.fetchone()
         
         if not penalty:
+            cursor.close()
             return jsonify({"error": "Penalty not found"}), 404
         
         if penalty['type'] == 'loan_late' and penalty['loan_id']:
+            cursor.close()
             return jsonify({
                 "error": "Cannot delete auto-generated loan penalties. Clear the loan instead."
             }), 400
         
         try:
-            db.execute("DELETE FROM penalties WHERE id = ? AND group_id = ?", (penalty_id, group_id))
+            cursor.execute("DELETE FROM penalties WHERE id = %s AND group_id = %s", (penalty_id, group_id))
             db.commit()
+            cursor.close()
             return jsonify({"status": "success", "message": "Penalty deleted"})
         except Exception as e:
             db.rollback()
+            cursor.close()
             return jsonify({"error": str(e)}), 500
     
-    # PUT - Update penalty
+    # PUT
     data = request.get_json()
     amount = float(data.get('amount', 0))
     description = data.get('description', '').strip()
     
     if amount <= 0:
+        cursor.close()
         return jsonify({"error": "Amount must be positive"}), 400
     
     try:
-        current = db.execute(
-            "SELECT amount_paid FROM penalties WHERE id = ? AND group_id = ?", 
+        cursor.execute(
+            "SELECT amount_paid FROM penalties WHERE id = %s AND group_id = %s", 
             (penalty_id, group_id)
-        ).fetchone()
+        )
+        current = cursor.fetchone()
         
         if not current:
+            cursor.close()
             return jsonify({"error": "Penalty not found"}), 404
         
         amount_paid = current['amount_paid'] or 0
         
         if amount < amount_paid:
+            cursor.close()
             return jsonify({
                 "error": f"Amount cannot be less than already paid: {amount_paid:,.0f} TZS"
             }), 400
         
-        db.execute(
-            "UPDATE penalties SET amount = ?, description = ? WHERE id = ? AND group_id = ?",
+        cursor.execute(
+            "UPDATE penalties SET amount = %s, description = %s WHERE id = %s AND group_id = %s",
             (amount, description, penalty_id, group_id)
         )
         db.commit()
+        cursor.close()
         return jsonify({"status": "success", "message": "Penalty updated"})
     except Exception as e:
         db.rollback()
+        cursor.close()
         return jsonify({"error": str(e)}), 500
 
 
@@ -1946,27 +2334,29 @@ def get_report_data():
     
     admin_id = get_group_admin_member_id(db, group_id)
 
-    members = db.execute(
-        "SELECT id, name FROM members WHERE group_id = ? AND is_system = 0", 
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, name FROM members WHERE group_id = %s AND is_system = 0", 
         (group_id,)
-    ).fetchall()
+    )
+    members = cursor.fetchall()
     
     report_data = []
 
     for m in members:
         member_id = m["id"]
         
-        contribs = db.execute(
+        cursor.execute(
             """SELECT type, SUM(amount) as total FROM contributions 
-               WHERE member_id=? AND group_id=? AND type != 'jamii_deduction' 
+               WHERE member_id=%s AND group_id=%s AND type != 'jamii_deduction' 
                GROUP BY type""",
             (member_id, group_id)
-        ).fetchall()
+        )
+        contribs = cursor.fetchall()
         
         contrib_dict = {c["type"]: c["total"] for c in contribs}
         total_contributions = sum(contrib_dict.values())
         
-        # FIX: Total savings includes Hisa Anzia + Hisa + Jamii
         member_total_savings = (
             contrib_dict.get('hisa anzia', 0) + 
             contrib_dict.get('hisa', 0) + 
@@ -1976,13 +2366,12 @@ def get_report_data():
         hisa_data = get_member_hisa_units(db, member_id, group_id)
         member_units = hisa_data['units']
 
-        # FIX: This now returns correct values (principal-based)
         loan_balances = get_member_loan_balances(db, member_id, group_id)
         total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
         
         net_contribution_position = (
             member_total_savings 
-            - loan_balances["remaining_loans"]  # FIX: Now correctly Principal - Repaid
+            - loan_balances["remaining_loans"]
             - total_penalties_due
         )
         
@@ -1995,9 +2384,9 @@ def get_report_data():
             "total_contributions": total_contributions,
             "total_savings": member_total_savings,
             "hisa_units": round(member_units, 2),
-            "total_loans": loan_balances["total_loans_committed"],  # FIX: Now = sum of principals
+            "total_loans": loan_balances["total_loans_committed"],
             "total_rejesho": loan_balances["total_rejesho"],
-            "remaining_loans": loan_balances["remaining_loans"],  # FIX: Now = Principal - Repaid
+            "remaining_loans": loan_balances["remaining_loans"],
             "total_overdue": loan_balances["total_overdue"],
             "total_penalties": total_penalties_due,
             "net_contribution_position": net_contribution_position,
@@ -2005,6 +2394,7 @@ def get_report_data():
             "net_payout": net_payout,
         })
 
+    cursor.close()
     return jsonify({"report": report_data})
 
 

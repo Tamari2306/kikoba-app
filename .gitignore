@@ -1,16 +1,48 @@
+# Environment variables
 .env
-.env.*
+.env.local
+
+# Python
 __pycache__/
-*.pyc
-venv/
+*.py[cod]
+*$py.class
+*.so
+.Python
 .venv/
+venv/
+env/
+ENV/
 
-# Databases
+# SQLite (old database)
 *.db
+*.db-journal
+kikoba.db
 
-# Uploads & generated files
-backend/uploads/
+# Uploads
+uploads/*
+!uploads/.gitkeep
 
-# OS files
+# Backups
+backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Flask
+instance/
+.webassets-cache
+
+# Distribution
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
