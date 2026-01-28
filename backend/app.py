@@ -2234,10 +2234,14 @@ def calculate_profits():
     profit_per_unit = net_profit / total_units
     
     admin_id = get_group_admin_member_id(db, group_id)
-    members = db.execute(
-        "SELECT id, name FROM members WHERE group_id = ? AND is_system = 0", 
+    
+    # FIX: Use cursor instead of db.execute()
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, name FROM members WHERE group_id = %s AND is_system = 0", 
         (group_id,)
-    ).fetchall()
+    )
+    members = cursor.fetchall()
     
     results = []
 
@@ -2249,37 +2253,39 @@ def calculate_profits():
         member_units = hisa_data['units']
         
         # Total savings includes Hisa Anzia + Hisa + Jamii (all to be returned)
-        total_savings_member = db.execute(
+        cursor.execute(
             """
             SELECT SUM(amount) 
             FROM contributions 
-            WHERE member_id = ? AND group_id = ? AND type IN ('hisa anzia', 'hisa', 'jamii')
+            WHERE member_id = %s AND group_id = %s AND type IN ('hisa anzia', 'hisa', 'jamii')
             """,
             (member_id, group_id)
-        ).fetchone()[0] or 0
+        )
+        total_savings_member = get_single_value(cursor, 0)
         
         profit_share = round(member_units * profit_per_unit)
 
-        # FIX: Calculate remaining loans directly instead of using get_member_loan_balances
-        # This ensures we get ALL loans (not just cleared/active status issues)
-        total_principal_taken = db.execute(
+        # Calculate remaining loans
+        cursor.execute(
             """
             SELECT SUM(principal) 
             FROM loans 
-            WHERE member_id = ? AND group_id = ?
+            WHERE member_id = %s AND group_id = %s
             """,
             (member_id, group_id)
-        ).fetchone()[0] or 0
+        )
+        total_principal_taken = get_single_value(cursor, 0)
         
-        total_repaid = db.execute(
+        cursor.execute(
             """
             SELECT SUM(r.amount) 
             FROM rejesho r
             JOIN loans l ON r.loan_id = l.id
-            WHERE l.member_id = ? AND l.group_id = ?
+            WHERE l.member_id = %s AND l.group_id = %s
             """,
             (member_id, group_id)
-        ).fetchone()[0] or 0
+        )
+        total_repaid = get_single_value(cursor, 0)
         
         remaining_loan_balance = max(total_principal_taken - total_repaid, 0)
 
@@ -2294,11 +2300,13 @@ def calculate_profits():
             "hisa_units": round(member_units, 2),
             "savings": total_savings_member,
             "profit_share": profit_share,
-            "loan_balance_due": remaining_loan_balance,  # FIX: Now correctly shows all remaining loans
+            "loan_balance_due": remaining_loan_balance,
             "penalties_due": total_penalties_due,
             "total_deductions": total_deductions,
             "total_payout": final_payout
         })
+
+    cursor.close()
 
     return jsonify({
         "total_interest": profit_data["total_interest"],
@@ -2503,58 +2511,63 @@ def export_raw_backup():
         return jsonify({"error": "No group selected"}), 400
     
     queries = {
-        "members": "SELECT * FROM members WHERE group_id = ? AND is_system = 0",
+        "members": "SELECT * FROM members WHERE group_id = %s AND is_system = 0",
         "contributions": """
             SELECT c.id, m.name as member_name, c.type, c.amount, c.date 
             FROM contributions c 
             JOIN members m ON c.member_id = m.id
-            WHERE c.group_id = ?
+            WHERE c.group_id = %s
         """,
         "loans": """
             SELECT l.id, m.name as member_name, l.principal, l.interest, l.total, l.start_date, l.due_date, l.status 
             FROM loans l 
             JOIN members m ON l.member_id = m.id
-            WHERE l.group_id = ?
+            WHERE l.group_id = %s
         """,
         "repayments": """
             SELECT r.id, m.name as member_name, r.loan_id, r.amount, r.date 
             FROM rejesho r 
-            JOIN members m ON (SELECT member_id FROM loans WHERE id = r.loan_id) = m.id
-            WHERE r.group_id = ?
+            JOIN loans l ON l.id = r.loan_id
+            JOIN members m ON l.member_id = m.id
+            WHERE r.group_id = %s
         """,
         "penalties": """
             SELECT p.id, m.name as member_name, p.type, p.amount, p.amount_paid, p.date, p.description 
             FROM penalties p 
             JOIN members m ON p.member_id = m.id
-            WHERE p.group_id = ?
+            WHERE p.group_id = %s
         """,
-        "settings": "SELECT * FROM settings WHERE group_id = ?"
+        "settings": "SELECT * FROM settings WHERE group_id = %s"
     }
 
     zip_buffer = BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
         for file_name, sql in queries.items():
-            cursor = db.execute(sql, (group_id,))
+            cursor = get_cursor(db)
+            cursor.execute(sql, (group_id,))
             rows = cursor.fetchall()
-            column_names = [column[0] for column in cursor.description]
+            column_names = [desc[0] for desc in cursor.description]
             
             csv_buffer = StringIO()
             writer = csv.writer(csv_buffer)
             writer.writerow(column_names)
 
             for row in rows:
-                data = list(row)
+                data = [row[col] for col in column_names]
                 writer.writerow(data)
             
             zip_file.writestr(f"{file_name}.csv", csv_buffer.getvalue())
             csv_buffer.close()
+            cursor.close()
 
-        admin_id = get_group_admin_member_id(db, group_id)
-        members = db.execute(
-            "SELECT id, name FROM members WHERE group_id = ? AND is_system = 0", 
+        # Balance sheet generation
+        cursor = get_cursor(db)
+        cursor.execute(
+            "SELECT id, name FROM members WHERE group_id = %s AND is_system = 0", 
             (group_id,)
-        ).fetchall()
+        )
+        members = cursor.fetchall()
         
         balance_csv = StringIO()
         balance_writer = csv.writer(balance_csv)
@@ -2580,6 +2593,7 @@ def export_raw_backup():
 
         zip_file.writestr("Group_Balance_Sheet.csv", balance_csv.getvalue())
         balance_csv.close()
+        cursor.close()
 
     zip_buffer.seek(0)
     return send_file(
