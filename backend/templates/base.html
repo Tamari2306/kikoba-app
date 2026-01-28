@@ -1,160 +1,158 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Kikoba Dashboard</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
-<style>
-.btn-success:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 12px rgba(0,0,0,0.15);
-}
-.dashboard-btn {
-    transition: transform 0.2s, box-shadow 0.2s;
-}
-
-.dashboard-btn:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 6px 15px rgba(0,0,0,0.2);
-}
-
-.dashboard-btn:active {
-    transform: translateY(1px);
-    box-shadow: 0 3px 8px rgba(0,0,0,0.15);
-}
-
-body { 
-    font-family:'Segoe UI', sans-serif; 
-    background:#f4f7f6; 
-}
-
-.sidebar {
-    height:100vh; 
-    width:220px; 
-    position:fixed; 
-    background:#2ca02c;
-    padding-top:20px;
-    display: flex;
-    flex-direction: column;
-}
-
-.sidebar-links {
-    flex: 1;
-}
-
-.sidebar a { 
-    display:block; 
-    color:#fff; 
-    padding:15px; 
-    text-decoration:none;
-    transition: background 0.2s, padding-left 0.2s;
-}
-
-.sidebar a.active, .sidebar a:hover { 
-    background:#279a27; 
-    font-weight:bold;
-    padding-left: 20px;
-}
-
-.sidebar a.logout-btn {
-    background: rgba(220, 53, 69, 0.8);
-    margin: 10px;
-    border-radius: 5px;
-    text-align: center;
-}
-
-.sidebar a.logout-btn:hover {
-    background: #dc3545;
-    padding-left: 15px;
-}
-
-.content { 
-    margin-left:240px; 
-    padding:20px; 
-}
-
-h2 { 
-    color:#2ca02c; 
-    margin-bottom:20px; 
-}
-
-.table-hover tbody tr:hover { 
-    background-color:#d0f0c0; 
-}
-
-.badge-overdue { 
-    background-color:#dc3545; 
-}
-
-.badge-active { 
-    background-color:#2ca02c; 
-}
-
-.btn-primary { 
-    background-color:#2ca02c; 
-    border:none; 
-}
-
-.btn-primary:hover { 
-    background-color:#279a27; 
-}
-
-.sidebar i {
-    margin-right: 8px;
-    font-size: 1.1rem;
-}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    
+    <title>{% block title %}Kikoba App{% endblock %}</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    
+    <!-- Mobile-specific optimizations -->
+    <style>
+        /* Prevent zoom on input focus (iOS) */
+        input, select, textarea {
+            font-size: 16px !important;
+        }
+        
+        /* Prevent horizontal scroll */
+        html, body {
+            max-width: 100%;
+            overflow-x: hidden;
+        }
+        
+        /* Mobile-friendly tables */
+        .table-responsive {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        
+        /* Better mobile spacing */
+        @media (max-width: 768px) {
+            .container-fluid {
+                padding-left: 10px;
+                padding-right: 10px;
+            }
+            
+            /* Stack dashboard cards on mobile */
+            .row.g-3 > [class*="col-"] {
+                margin-bottom: 15px;
+            }
+            
+            /* Make buttons full-width on mobile */
+            .btn-group-mobile {
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+            
+            .btn-group-mobile .btn {
+                width: 100%;
+            }
+            
+            /* Smaller cards on mobile */
+            .card-body {
+                padding: 1rem;
+            }
+            
+            .card-body h3, .card-body h4 {
+                font-size: 1.25rem;
+            }
+            
+            /* Responsive modal */
+            .modal-xl {
+                margin: 0.5rem;
+            }
+        }
+        
+        /* Responsive tables */
+        @media (max-width: 992px) {
+            table {
+                font-size: 0.875rem;
+            }
+            
+            table th, table td {
+                padding: 0.5rem;
+            }
+        }
+    </style>
+    
+    {% block extra_css %}{% endblock %}
 </head>
 <body>
-
-<div class="sidebar">
-    <div class="sidebar-links">
-        <a href="/dashboard" class="{% if request.path == '/dashboard' %}active{% endif %}">
-            <i class="bi bi-speedometer2"></i> Dashboard
-        </a>
-
-        <a href="/members-page" class="{% if request.path == '/members-page' %}active{% endif %}">
-            <i class="bi bi-people-fill"></i> Members
-        </a>
-
-        <a href="/contributions-page" class="{% if request.path == '/contributions-page' %}active{% endif %}">
-            <i class="bi bi-cash-coin"></i> Contributions
-        </a>
-
-        <a href="/loans-page" class="{% if request.path == '/loans-page' %}active{% endif %}">
-            <i class="bi bi-bank"></i> Loans
-        </a>
-
-        <a href="/repayments-page" class="{% if request.path == '/repayments-page' %}active{% endif %}">
-            <i class="bi bi-arrow-repeat"></i> Repayments
-        </a>
-
-        <a href="/penalties-page" class="{% if request.path == '/penalties-page' %}active{% endif %}">
-            <i class="bi bi-exclamation-triangle-fill"></i> Penalties
-        </a>
-
-        <a href="/profits-page" class="{% if request.path == '/profits-page' %}active{% endif %}">
-            <i class="bi bi-bar-chart-line-fill"></i> Profits
-        </a>
-
-        <a href="/reports-page" class="{% if request.path == '/reports-page' %}active{% endif %}">
-            <i class="bi bi-file-earmark-text-fill"></i> Reports
-        </a>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-success mb-4">
+        <div class="container-fluid">
+            <a class="navbar-brand fw-bold" href="/dashboard">
+                <i class="bi bi-piggy-bank-fill"></i> Kikoba App
+            </a>
+            
+            <!-- Mobile toggle button -->
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/dashboard">
+                            <i class="bi bi-speedometer2"></i> Dashboard
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/members-page">
+                            <i class="bi bi-people-fill"></i> Members
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/contributions-page">
+                            <i class="bi bi-wallet2"></i> Contributions
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/loans-page">
+                            <i class="bi bi-cash-stack"></i> Loans
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/penalties-page">
+                            <i class="bi bi-exclamation-triangle-fill"></i> Penalties
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/profits-page">
+                            <i class="bi bi-graph-up-arrow"></i> Profits
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/reports-page">
+                            <i class="bi bi-file-earmark-text"></i> Reports
+                        </a>
+                    </li>
+                </ul>
+                
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/logout">
+                            <i class="bi bi-box-arrow-right"></i> Logout
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+    
+    <!-- Main Content -->
+    <div class="container-fluid">
+        {% block content %}{% endblock %}
     </div>
-
-    <!-- Logout Button at Bottom -->
-    <a href="/logout" class="logout-btn">
-        <i class="bi bi-box-arrow-right"></i> Logout
-    </a>
-</div>
-
-<div class="content">
-    {% block content %}{% endblock %}
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.1/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    {% block extra_js %}{% endblock %}
 </body>
 </html>
