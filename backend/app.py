@@ -2011,15 +2011,16 @@ def get_rejesho_history(loan_id):
 
 # ==================== PENALTIES ====================
 
-from regen_penalties import regenerate_penalties
+from fix_loans_and_penalties import fix_loans_and_penalties
 
-@app.route("/admin/regenerate-penalties")
-def regenerate_penalties_endpoint():
+@app.route("/admin/fix-loans-and-penalties")
+def fix_loans_and_penalties_endpoint():
     try:
-        regenerate_penalties()
-        return {"status": "✅ Penalties regenerated successfully"}
+        fix_loans_and_penalties()
+        return {"status": "✅ Loan due dates fixed & penalties regenerated"}
     except Exception as e:
         return {"status": "❌ Error", "message": str(e)}, 500
+
 
 
 @app.route('/penalties-page')
