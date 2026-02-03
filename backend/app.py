@@ -382,12 +382,11 @@ def update_loan_status(db, loan_id, group_id):
     cursor.close()
 
 
-def auto_insert_loan_penalties(group_id):
+def auto_insert_loan_penalties(db, group_id):
     """
     NEW PENALTY SYSTEM: Finds overdue MONTHLY REJESHO payments and charges 1000/day per late payment.
     Penalties start the day AFTER the due date (same day next month).
     """
-    db = get_db()
 
     settings = get_group_settings(db, group_id)
     daily_penalty = float(settings.get("daily_penalty_amount", 1000))
@@ -781,7 +780,7 @@ def get_dashboard_data():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    auto_insert_loan_penalties(group_id)
+    auto_insert_loan_penalties(db, group_id)
 
     profit_data = get_current_group_profit(db, group_id)
     settings = get_group_settings(db, group_id)
@@ -1492,7 +1491,7 @@ def get_loans():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
     
-    auto_insert_loan_penalties(group_id)
+    auto_insert_loan_penalties(db, group_id)
 
     cursor = get_cursor(db)
     cursor.execute("""
