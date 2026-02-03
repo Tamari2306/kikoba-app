@@ -393,12 +393,15 @@ def auto_insert_loan_penalties(db, group_id):
 
     today = datetime.now().date()
 
-    active_loans = db.execute("""
+    cursor = get_cursor(db)
+
+    cursor.execute("""
         SELECT l.id, l.member_id, l.principal, l.months, l.start_date, l.due_date
         FROM loans l
-        WHERE l.group_id = ? 
+        WHERE l.group_id = %s 
           AND l.status IN ('Active', 'Overdue')
-    """, (group_id,)).fetchall()
+    """, (group_id,))
+    active_loans = cursor.fetchall()
 
     for loan in active_loans:
         loan_id = loan['id']
@@ -406,45 +409,37 @@ def auto_insert_loan_penalties(db, group_id):
         monthly_rejesho = loan['principal'] / loan['months']
         final_due_date = datetime.strptime(loan['due_date'], "%Y-%m-%d").date()
         
-        # Derive the base day from the final due_date so edits to due_date are respected
         base_day = final_due_date.day
         
-        # Work backwards from final_due_date to find the start month
-        # e.g. if due_date is April 2 and months is 3, first payment is Feb 2
         base_month = final_due_date.month - loan['months']
         base_year = final_due_date.year
         if base_month <= 0:
             base_month += 12
             base_year -= 1
         
-        # Check each monthly payment
         for month_num in range(1, loan['months'] + 1):
-            # Calculate due date for this specific month relative to base
             due_month = base_month + month_num
             due_year = base_year
             if due_month > 12:
                 due_month -= 12
                 due_year += 1
             
-            # Handle edge case: if base_day doesn't exist in due month
             max_day_in_due_month = calendar.monthrange(due_year, due_month)[1]
             due_day = min(base_day, max_day_in_due_month)
             
             month_due_date = datetime(due_year, due_month, due_day).date()
             
-            # Only charge penalty AFTER the due date
             if today <= month_due_date:
                 continue
             
-            # Check how much has been paid
-            total_paid = db.execute("""
+            cursor.execute("""
                 SELECT SUM(amount) FROM rejesho 
-                WHERE loan_id = ? AND group_id = ?
-            """, (loan_id, group_id)).fetchone()[0] or 0
+                WHERE loan_id = %s AND group_id = %s
+            """, (loan_id, group_id))
+            total_paid = get_single_value(cursor, 0)
             
             expected_by_this_month = monthly_rejesho * month_num
             
-            # If underpaid for this month, calculate penalty
             if total_paid < expected_by_this_month:
                 days_late = (today - month_due_date).days
                 
@@ -453,48 +448,46 @@ def auto_insert_loan_penalties(db, group_id):
                 
                 penalty_amount = days_late * daily_penalty
                 
-                # Check if penalty already exists for this specific month
-                exists = db.execute("""
+                cursor.execute("""
                     SELECT id, amount FROM penalties
-                    WHERE loan_id = ? AND group_id = ? 
+                    WHERE loan_id = %s AND group_id = %s 
                       AND type = 'monthly_rejesho_late'
-                      AND description LIKE ?
-                """, (loan_id, group_id, f"%Month {month_num}%")).fetchone()
+                      AND description LIKE %s
+                """, (loan_id, group_id, f"%Month {month_num}%"))
+                exists = cursor.fetchone()
                 
                 if exists:
-                    # Update existing penalty amount
-                    db.execute("""
+                    cursor.execute("""
                         UPDATE penalties 
-                        SET amount = ?, date = ?
-                        WHERE id = ?
-                    """, (penalty_amount, today.strftime("%Y-%m-%d"), exists['id']))
+                        SET amount = %s, description = %s, date = %s
+                        WHERE id = %s
+                    """, (penalty_amount, f"Month {month_num} rejesho overdue by {days_late} days", today.strftime("%Y-%m-%d"), exists['id']))
                 else:
-                    # Insert new penalty
-                    db.execute("""
+                    cursor.execute("""
                         INSERT INTO penalties (
                             group_id, member_id, loan_id, type, amount,
                             description, date
-                        ) VALUES (?, ?, ?, 'monthly_rejesho_late', ?, ?, ?)
+                        ) VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s)
                     """, (
                         group_id, member_id, loan_id, penalty_amount,
                         f"Month {month_num} rejesho overdue by {days_late} days",
                         today.strftime("%Y-%m-%d")
                     ))
         
-        # Update loan status
-        total_paid_overall = db.execute(
-            "SELECT SUM(amount) FROM rejesho WHERE loan_id = ? AND group_id = ?",
-            (loan_id, group_id)
-        ).fetchone()[0] or 0
+        cursor.execute("""
+            SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s
+        """, (loan_id, group_id))
+        total_paid_overall = get_single_value(cursor, 0)
         
         remaining = loan['principal'] - total_paid_overall
         
         if remaining <= 0:
-            db.execute("UPDATE loans SET status = 'Cleared' WHERE id = ?", (loan_id,))
+            cursor.execute("UPDATE loans SET status = 'Cleared' WHERE id = %s", (loan_id,))
         elif today > datetime.strptime(loan['due_date'], "%Y-%m-%d").date():
-            db.execute("UPDATE loans SET status = 'Overdue' WHERE id = ?", (loan_id,))
+            cursor.execute("UPDATE loans SET status = 'Overdue' WHERE id = %s", (loan_id,))
 
     db.commit()
+    cursor.close()
 
 
 def get_member_loan_balances(db, member_id, group_id):
@@ -1566,12 +1559,15 @@ def add_loan():
         if not member_id or principal <= 0:
             return jsonify({"error": "Invalid member or principal amount"}), 400
 
-        member = db.execute(
-            "SELECT id FROM members WHERE id = ? AND group_id = ?",
+        cursor = get_cursor(db)
+        cursor.execute(
+            "SELECT id FROM members WHERE id = %s AND group_id = %s",
             (member_id, group_id)
-        ).fetchone()
+        )
+        member = cursor.fetchone()
         
         if not member:
+            cursor.close()
             return jsonify({"error": "Member not found in this group"}), 400
 
         settings = get_group_settings(db, group_id)
@@ -1641,19 +1637,18 @@ def add_loan():
         
         # Handle edge case: if start day doesn't exist in due month (e.g., Jan 31 -> Feb 31)
         # Use the last day of that month instead
-        import calendar
         max_day_in_due_month = calendar.monthrange(due_year, due_month)[1]
         if due_day > max_day_in_due_month:
             due_day = max_day_in_due_month
         
         due_date = datetime(due_year, due_month, due_day)
 
-        db.execute("""
+        cursor.execute("""
             INSERT INTO loans (
                 group_id, member_id, principal, interest, total,
                 net_amount, start_date, due_date, months, status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Active')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'Active')
         """, (
             group_id, member_id, principal, interest, total,
             net_amount, start_date.strftime("%Y-%m-%d"),
@@ -1661,6 +1656,7 @@ def add_loan():
         ))
 
         db.commit()
+        cursor.close()
 
         response_data = {
             "status": "success",
@@ -1682,6 +1678,10 @@ def add_loan():
     except Exception as e:
         db.rollback()
         print("Add loan error:", e)
+        try:
+            cursor.close()
+        except:
+            pass
         return jsonify({"error": "Failed to add loan"}), 500
 
 
