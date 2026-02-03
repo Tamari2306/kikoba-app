@@ -2011,17 +2011,6 @@ def get_rejesho_history(loan_id):
 
 # ==================== PENALTIES ====================
 
-from fix_loans_and_penalties import fix_loans_and_penalties
-
-@app.route("/admin/fix-loans-and-penalties")
-def fix_loans_and_penalties_endpoint():
-    try:
-        fix_loans_and_penalties()
-        return {"status": "✅ Loan due dates fixed & penalties regenerated"}
-    except Exception as e:
-        return {"status": "❌ Error", "message": str(e)}, 500
-
-
 
 @app.route('/penalties-page')
 def penalties_page():
@@ -2247,6 +2236,79 @@ def edit_penalty(penalty_id):
         db.rollback()
         cursor.close()
         return jsonify({"error": str(e)}), 500
+    
+
+@app.route('/penalties-page/download', methods=['GET'])
+def download_penalties_pdf():
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return "No group selected", 400
+
+    settings = get_group_settings(db, group_id)
+    group_name = settings.get("group_name", "Kikoba App")
+
+    cursor = get_cursor(db)
+    cursor.execute("""
+        SELECT p.*, m.name AS member_name
+        FROM penalties p
+        JOIN members m ON p.member_id = m.id
+        WHERE p.group_id = %s
+        ORDER BY p.date DESC
+    """, (group_id,))
+    penalties = cursor.fetchall()
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4),
+                            rightMargin=20, leftMargin=20, topMargin=40, bottomMargin=20)
+    elements = []
+    styles = getSampleStyleSheet()
+
+    title = Paragraph(f"🚨 {group_name} - Penalties Report", styles['Title'])
+    elements.append(title)
+    elements.append(Spacer(1, 12))
+
+    report_date = datetime.now().strftime("%d %B %Y, %I:%M %p")
+    subtitle = Paragraph(f"<i>Generated on: {report_date}</i>", styles['Normal'])
+    elements.append(subtitle)
+    elements.append(Spacer(1, 20))
+
+    headers = ["Member", "Type", "Amount", "Amount Paid", "Remaining Due", "Description", "Date"]
+    data = [headers]
+
+    total_outstanding = 0
+    for p in penalties:
+        remaining = max(p['amount'] - p.get('amount_paid', 0), 0)
+        total_outstanding += remaining
+        data.append([
+            p['member_name'],
+            "Auto Loan" if p['type'] == "monthly_rejesho_late" else "Manual",
+            f"{p['amount']:,.0f}",
+            f"{p.get('amount_paid', 0):,.0f}",
+            f"{remaining:,.0f}",
+            p.get('description', ''),
+            p['date']
+        ])
+
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#FFC107')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+        ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+        ('ALIGN', (0,0), (0,-1), 'LEFT'),
+        ('FONTSIZE', (0,0), (-1,-1), 9),
+        ('GRID', (0,0), (-1,-1), 0.3, colors.grey),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#f8f9fa')]),
+    ]))
+    elements.append(table)
+    elements.append(Spacer(1, 20))
+
+    doc.build(elements)
+    buffer.seek(0)
+    cursor.close()
+
+    filename = f"{group_name.replace(' ', '_')}_Penalties_Report_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return send_file(buffer, as_attachment=True, download_name=filename, mimetype="application/pdf")
 
 
 # ==================== PROFITS ====================
