@@ -1,4 +1,4 @@
-from db import get_db, auto_insert_loan_penalties, get_cursor
+from app import get_db, auto_insert_loan_penalties, get_cursor
 from datetime import datetime
 
 def regenerate_penalties():
