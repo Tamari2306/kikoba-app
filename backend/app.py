@@ -1122,11 +1122,175 @@ def record_jamii_deduction():
 
 
 # ==================== MEMBERS ====================
-
 @app.route('/members-page')
 def members_page():
     return render_template('members.html')
 
+@app.route('/member-details/<int:member_id>')
+def member_details_page(member_id):
+    if "admin_id" not in session:
+        return redirect("/login")
+    
+    if "group_id" not in session:
+        return redirect("/create-group")
+    
+    return render_template('member_details.html', member_id=member_id)
+
+
+@app.route('/api/members/<int:member_id>/details', methods=['GET'])
+def get_member_details(member_id):
+    db = get_db()
+    group_id = get_current_group_id()
+    
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+    
+    cursor = get_cursor(db)
+    
+    # Get member basic info
+    cursor.execute(
+        "SELECT id, name, phone, joined_date FROM members WHERE id = %s AND group_id = %s AND is_system = 0",
+        (member_id, group_id)
+    )
+    member = cursor.fetchone()
+    
+    if not member:
+        cursor.close()
+        return jsonify({"error": "Member not found"}), 404
+    
+    # Get contribution breakdown
+    cursor.execute(
+        """SELECT type, SUM(amount) as total FROM contributions 
+           WHERE member_id=%s AND group_id=%s AND type != 'jamii_deduction' 
+           GROUP BY type""",
+        (member_id, group_id)
+    )
+    contribs = cursor.fetchall()
+    contrib_dict = {c["type"]: c["total"] for c in contribs}
+    total_contributions = sum(contrib_dict.values())
+    
+    # Get contribution history
+    cursor.execute(
+        """SELECT id, type, amount, date, transaction_date 
+           FROM contributions 
+           WHERE member_id = %s AND group_id = %s AND type != 'jamii_deduction'
+           ORDER BY date DESC""",
+        (member_id, group_id)
+    )
+    contribution_history = cursor.fetchall()
+    
+    # Calculate savings
+    member_total_savings = (
+        contrib_dict.get('hisa anzia', 0) + 
+        contrib_dict.get('hisa', 0) + 
+        contrib_dict.get('jamii', 0)
+    )
+    
+    # Get HISA units
+    settings = get_group_settings(db, group_id)
+    hisa_data = get_member_hisa_units(db, member_id, group_id)
+    member_units = hisa_data['units']
+    
+    # Get loan information
+    loan_balances = get_member_loan_balances(db, member_id, group_id)
+    
+    # Get all loans with details
+    cursor.execute(
+        """SELECT id, principal, interest, net_amount, months, start_date, due_date, status 
+           FROM loans WHERE member_id = %s AND group_id = %s ORDER BY start_date DESC""",
+        (member_id, group_id)
+    )
+    loans = cursor.fetchall()
+    
+    loan_details = []
+    for loan in loans:
+        cursor.execute(
+            "SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s",
+            (loan['id'], group_id)
+        )
+        repaid = get_single_value(cursor, 0)
+        remaining = max(loan['principal'] - repaid, 0)
+        
+        loan_details.append({
+            "id": loan['id'],
+            "principal": loan['principal'],
+            "interest": loan['interest'],
+            "net_amount": loan['net_amount'],
+            "months": loan['months'],
+            "start_date": loan['start_date'],
+            "due_date": loan['due_date'],
+            "status": loan['status'],
+            "repaid": repaid,
+            "remaining": remaining
+        })
+    
+    # Get penalties
+    total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
+    
+    cursor.execute(
+        """SELECT id, type, amount, amount_paid, description, date 
+           FROM penalties 
+           WHERE member_id = %s AND group_id = %s 
+           ORDER BY date DESC""",
+        (member_id, group_id)
+    )
+    penalties = cursor.fetchall()
+    
+    penalty_details = []
+    for p in penalties:
+        remaining = max(p['amount'] - (p['amount_paid'] or 0), 0)
+        penalty_details.append({
+            "id": p['id'],
+            "type": p['type'],
+            "amount": p['amount'],
+            "amount_paid": p['amount_paid'] or 0,
+            "remaining": remaining,
+            "description": p['description'],
+            "date": p['date']
+        })
+    
+    # Calculate profit share
+    profit_data = get_current_group_profit(db, group_id)
+    net_profit = profit_data["net_profit_pool"]
+    total_units = get_total_hisa_units(db, group_id)
+    profit_per_unit = net_profit / total_units if total_units > 0 else 0
+    expected_profit_share = round(member_units * profit_per_unit)
+    
+    # Calculate net position
+    net_contribution_position = (
+        member_total_savings 
+        - loan_balances["remaining_loans"]
+        - total_penalties_due
+    )
+    net_payout = net_contribution_position + expected_profit_share
+    
+    cursor.close()
+    
+    return jsonify({
+        "member": {
+            "id": member['id'],
+            "name": member['name'],
+            "phone": member['phone'],
+            "joined_date": member['joined_date']
+        },
+        "summary": {
+            "contributions": contrib_dict,
+            "total_contributions": total_contributions,
+            "total_savings": member_total_savings,
+            "hisa_units": round(member_units, 2),
+            "total_loans": loan_balances["total_loans_committed"],
+            "total_rejesho": loan_balances["total_rejesho"],
+            "remaining_loans": loan_balances["remaining_loans"],
+            "total_overdue": loan_balances["total_overdue"],
+            "total_penalties": total_penalties_due,
+            "net_contribution_position": net_contribution_position,
+            "expected_profit_share": expected_profit_share,
+            "net_payout": net_payout
+        },
+        "contribution_history": [dict(c) for c in contribution_history],
+        "loans": loan_details,
+        "penalties": penalty_details
+    })
 
 @app.route('/api/members', methods=['GET'])
 def get_members():
@@ -1310,6 +1474,7 @@ def edit_member(member_id):
         db.rollback()
         cursor.close()
         return jsonify({"error": str(e)}), 500
+
 
 
 # ==================== CONTRIBUTIONS ====================
