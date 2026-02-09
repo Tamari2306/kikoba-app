@@ -101,7 +101,18 @@
 <div class="alert alert-info mt-4">
     <strong>ℹ️ Note:</strong> Total Contributions includes Hisa Anzia, Hisa, Jamii and Penalties paid. 
     Jamii is no longer mandatory and will be returned to members at cycle end along with their Hisa contributions.
+    <br><strong>💡 Tip:</strong> <span class="badge bg-primary">Click on any member row</span> to view their detailed information, contribution history, loans, and penalties.
 </div>
+
+<style>
+    #membersTableBody tr {
+        cursor: pointer;
+        transition: background-color 0.2s ease;
+    }
+    #membersTableBody tr:hover {
+        background-color: #e8f5e9 !important;
+    }
+</style>
 
 <script>
 const API = "/api/members";
@@ -128,34 +139,52 @@ function renderMembers(list) {
             ? `<span class="badge bg-danger">Outstanding</span>`
             : `<span class="badge bg-success">Cleared</span>`;
 
-        body.innerHTML += `
-            <tr>
-                <td class="fw-bold">${m.name}</td>
-                <td>${m.phone || "—"}</td>
-                <td class="text-end">${money(m.total_contributions)}</td>
-                <td class="text-end">${m.hisa_units.toFixed(2)} units</td>
-                <td class="text-end">${money(m.total_loans_committed)}</td>
-                <td class="text-end text-danger">${money(m.total_outstanding)}</td>
-                <td class="text-end">${money(m.total_penalties)}</td>
-                <td class="text-center">${status}</td>
-                <td class="text-center">
-                    <button class="btn btn-sm btn-outline-warning edit-btn" data-id="${m.id}" data-name="${m.name}" data-phone="${m.phone || ''}">
-                        <i class="fas fa-edit"></i>
-                    </button>
-                    <button class="btn btn-sm btn-outline-danger delete-btn" data-id="${m.id}" data-name="${m.name}">
-                        <i class="fas fa-trash"></i>
-                    </button>
-                </td>
-            </tr>
+        const tr = document.createElement('tr');
+        tr.dataset.memberId = m.id;
+        
+        tr.innerHTML = `
+            <td class="fw-bold">${m.name}</td>
+            <td>${m.phone || "—"}</td>
+            <td class="text-end">${money(m.total_contributions)}</td>
+            <td class="text-end">${m.hisa_units.toFixed(2)} units</td>
+            <td class="text-end">${money(m.total_loans_committed)}</td>
+            <td class="text-end text-danger">${money(m.total_outstanding)}</td>
+            <td class="text-end">${money(m.total_penalties)}</td>
+            <td class="text-center">${status}</td>
+            <td class="text-center action-buttons">
+                <button class="btn btn-sm btn-outline-warning edit-btn" data-id="${m.id}" data-name="${m.name}" data-phone="${m.phone || ''}">
+                    <i class="fas fa-edit"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-danger delete-btn" data-id="${m.id}" data-name="${m.name}">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </td>
         `;
+
+        // Make entire row clickable (except action buttons)
+        tr.addEventListener('click', function(event) {
+            // Check if click was on action buttons or their children
+            if (!event.target.closest('.action-buttons')) {
+                window.location.href = '/member-details/' + m.id;
+            }
+        });
+
+        body.appendChild(tr);
     });
 
-    // Attach event listeners
+    // Attach event listeners to buttons
     document.querySelectorAll('.edit-btn').forEach(btn => {
-        btn.addEventListener('click', handleEdit);
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation(); // Prevent row click
+            handleEdit(e);
+        });
     });
+    
     document.querySelectorAll('.delete-btn').forEach(btn => {
-        btn.addEventListener('click', handleDelete);
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation(); // Prevent row click
+            handleDelete(e);
+        });
     });
 }
 
