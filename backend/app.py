@@ -20,7 +20,7 @@ import psycopg2.extras
 from config import Config
 import calendar
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static")
 app.config.from_object(Config)
 
 # Load configuration
