@@ -2,8 +2,11 @@ const CACHE_NAME = "kikoba-v1";
 const urlsToCache = [
   "/",
   "/dashboard",
-  "/offline.html"
+  "/static/icons/favicon.ico",
+  "/static/icons/apple-touch-icon.png",
+  "/static/css/style.css"
 ];
+
 
 self.addEventListener("install", event => {
   event.waitUntil(
