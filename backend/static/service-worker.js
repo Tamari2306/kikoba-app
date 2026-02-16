@@ -4,7 +4,7 @@ const urlsToCache = [
   "/dashboard",
   "/static/icons/favicon.ico",
   "/static/icons/apple-touch-icon.png",
-  "/static/css/style.css"
+  "/static/style.css"
 ];
 
 
