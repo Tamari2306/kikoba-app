@@ -1,3 +1,7 @@
+#kikoba-app/backend/app.py
+from dotenv import load_dotenv
+load_dotenv()
+
 import zipfile
 from flask import Flask, redirect, request, jsonify, render_template, send_file, send_from_directory, session, g
 from flask_cors import CORS
@@ -19,6 +23,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import psycopg2.extras
 from config import Config
 import calendar
+
 
 app = Flask(__name__, static_folder="static")
 app.config.from_object(Config)
