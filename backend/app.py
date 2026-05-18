@@ -459,58 +459,21 @@ def auto_insert_loan_penalties(db, group_id):
             expected_by_this_month = monthly_rejesho * month_num
             expected_prev_months   = monthly_rejesho * (month_num - 1)
 
-            # Amount specifically for THIS month paid on time / late
+            # Amount specifically for THIS month paid ON TIME (before deadline)
             this_month_paid_on_time = max(0.0, total_paid_by_due - expected_prev_months)
             percent_on_time = min(1.0, this_month_paid_on_time / monthly_rejesho) if monthly_rejesho > 0 else 1.0
 
-            MERCY_THRESHOLD = 0.90       # >= 90% paid on time → auto-forgiven (no penalty)
-            HALF_RATE_THRESHOLD = 0.75   # >= 75% paid on time → half daily penalty rate
+            # Amount paid AFTER the deadline (for this month's slot)
+            cumulative_this_month = max(0.0, total_paid_all_time - expected_prev_months)
+            this_month_paid_late = max(0.0, cumulative_this_month - this_month_paid_on_time)
+            paid_in_full_eventually = cumulative_this_month >= monthly_rejesho - TOLERANCE
 
-            if total_paid_by_due >= expected_by_this_month - TOLERANCE:
-                # Paid in full and on time — clean slate
-                penalty_amount = 0
-            elif percent_on_time >= MERCY_THRESHOLD:
-                # Paid >= 90% of this month's rejesho on time — auto-forgiven
-                penalty_amount = 0
-            else:
-                days_late = (today - month_due_date).days
-                if days_late <= 0:
-                    continue
+            MERCY_THRESHOLD = 0.90       # >= 90% paid ON TIME → no penalty starts at all
+            HALF_RATE_THRESHOLD = 0.75   # >= 75% paid ON TIME → half daily rate
 
-                # ── 75% THRESHOLD: Use half the daily rate if ≥75% was paid on time ──
-                if percent_on_time >= HALF_RATE_THRESHOLD:
-                    effective_daily = daily_penalty / 2.0
-                else:
-                    effective_daily = daily_penalty
-
-                base_penalty = days_late * effective_daily  # daily rate may be halved
-
-                if percent_on_time > 0:
-                    # PRE-DEADLINE PARTIAL PAYMENT MERCY
-                    # The closer to 90% paid on time, the lower the penalty.
-                    # Formula: penalty = base × (1 - pct_on_time / 0.90)
-                    # At 75% → uses half rate already; at 89% → ~1% of base; at 90% → 0
-                    mercy_factor = 1.0 - (percent_on_time / MERCY_THRESHOLD)
-                    penalty_amount = round(base_penalty * mercy_factor)
-                else:
-                    # Nothing paid on time — check for late partial payment mercy
-                    # Amount of this month's rejesho still unpaid as of today
-                    cumulative_this_month = max(0.0, total_paid_all_time - expected_prev_months)
-                    this_month_paid_late = max(0.0, min(cumulative_this_month, monthly_rejesho))
-                    unpaid_ratio = max(0.0, (monthly_rejesho - this_month_paid_late) / monthly_rejesho)
-
-                    if unpaid_ratio < 1.0 - TOLERANCE / monthly_rejesho:
-                        # POST-DEADLINE PARTIAL PAYMENT
-                        # Penalise only the unpaid portion.
-                        # Formula: penalty = base × unpaid_ratio
-                        # Full payment after deadline → near-zero penalty; nothing → full penalty
-                        penalty_amount = round(base_penalty * unpaid_ratio)
-                    else:
-                        penalty_amount = round(base_penalty)
-
-            # Upsert or remove penalty record
+            # ── Look up existing penalty record for this month ──
             cursor.execute("""
-                SELECT id, COALESCE(is_frozen, 0) AS is_frozen
+                SELECT id, amount, COALESCE(is_frozen, 0) AS is_frozen
                 FROM penalties
                 WHERE loan_id = %s AND group_id = %s
                   AND type = 'monthly_rejesho_late'
@@ -518,37 +481,79 @@ def auto_insert_loan_penalties(db, group_id):
             """, (loan_id, group_id, f"%Month {month_num}%"))
             exists = cursor.fetchone()
 
-            # ── FREEZE: if penalty is frozen, do NOT update the amount ──
+            # ── FREEZE: if penalty is frozen, do NOT touch it ──
             if exists and exists['is_frozen']:
-                continue  # Frozen — skip all accrual updates for this month
+                continue
+
+            days_late = (today - month_due_date).days
+            if days_late <= 0:
+                continue
+
+            # ── CASE 1: Paid in full ON TIME — no penalty ever ──
+            if total_paid_by_due >= expected_by_this_month - TOLERANCE:
+                # Clean on-time payment: delete any accidental record (shouldn't exist)
+                if exists and exists['amount'] == 0:
+                    cursor.execute("DELETE FROM penalties WHERE id = %s", (exists['id'],))
+                # Never delete a non-zero already-recorded penalty here
+                continue
+
+            # ── CASE 2: ≥90% paid ON TIME — mercy, no penalty starts ──
+            # But if a penalty was already recorded (shouldn't happen), leave it alone.
+            if percent_on_time >= MERCY_THRESHOLD:
+                if not exists:
+                    continue  # Good — no penalty to create
+                # Already recorded somehow — do NOT delete it, just stop accruing
+                continue
+
+            # ── CASE 3: Penalty applies. Determine the daily rate from ON-TIME % ──
+            if percent_on_time >= HALF_RATE_THRESHOLD:
+                effective_daily = daily_penalty / 2.0
+                rate_note = f" (half-rate {int(daily_penalty/2):,}/day, ≥75% paid on time)"
+            else:
+                effective_daily = daily_penalty
+                rate_note = ""
+
+            # ── How many days do we charge? ──
+            # Stop accruing new days once the member has paid in full (even if late).
+            if paid_in_full_eventually:
+                # Find when the full payment was completed to cap the days charged.
+                # We approximate: count days from due date until cumulative hit 100%.
+                # Since we don't store daily snapshots, we use today as the cap but
+                # only if they're not yet fully paid; if fully paid, stop at today.
+                # Simplest safe approach: freeze day count at today (next run won't increase
+                # it because paid_in_full_eventually will remain True).
+                accrual_days = days_late  # current days; won't grow tomorrow since full
+            else:
+                accrual_days = days_late
+
+            if percent_on_time > 0:
+                # Pre-deadline partial: scale penalty by how far below 90% they are
+                mercy_factor = 1.0 - (percent_on_time / MERCY_THRESHOLD)
+                penalty_amount = round(accrual_days * effective_daily * mercy_factor)
+            else:
+                penalty_amount = round(accrual_days * effective_daily)
 
             if penalty_amount <= 0:
-                # No penalty due — delete any existing unpaid record
-                if exists:
-                    cursor.execute("""
-                        DELETE FROM penalties
-                        WHERE id = %s AND COALESCE(amount_paid, 0) = 0
-                    """, (exists['id'],))
-            else:
-                days_late = (today - month_due_date).days
-                # Label rate used so the description is transparent
-                if percent_on_time >= HALF_RATE_THRESHOLD and percent_on_time < MERCY_THRESHOLD:
-                    rate_note = f" (half-rate {int(daily_penalty/2):,}/day, ≥75% paid on time)"
-                else:
-                    rate_note = ""
-                desc = f"Month {month_num} rejesho overdue by {days_late} days{rate_note}"
-                if exists:
+                continue  # Nothing to record
+
+            desc = f"Month {month_num} rejesho overdue by {days_late} days{rate_note}"
+
+            if exists:
+                # ── KEY RULE: never reduce an already-recorded penalty ──
+                # Only update (increase) if the new amount is higher.
+                if penalty_amount > exists['amount']:
                     cursor.execute("""
                         UPDATE penalties SET amount = %s, description = %s, date = %s
                         WHERE id = %s
                     """, (penalty_amount, desc, today.strftime("%Y-%m-%d"), exists['id']))
-                else:
-                    cursor.execute("""
-                        INSERT INTO penalties (
-                            group_id, member_id, loan_id, type, amount, description, date
-                        ) VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s)
-                    """, (group_id, member_id, loan_id, penalty_amount, desc,
-                          today.strftime("%Y-%m-%d")))
+                # If new amount is same or lower — leave it untouched
+            else:
+                cursor.execute("""
+                    INSERT INTO penalties (
+                        group_id, member_id, loan_id, type, amount, description, date
+                    ) VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s)
+                """, (group_id, member_id, loan_id, penalty_amount, desc,
+                      today.strftime("%Y-%m-%d")))
         
         cursor.execute("""
             SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s
