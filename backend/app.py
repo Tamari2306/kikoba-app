@@ -463,7 +463,8 @@ def auto_insert_loan_penalties(db, group_id):
             this_month_paid_on_time = max(0.0, total_paid_by_due - expected_prev_months)
             percent_on_time = min(1.0, this_month_paid_on_time / monthly_rejesho) if monthly_rejesho > 0 else 1.0
 
-            MERCY_THRESHOLD = 0.90  # >= 90% paid on time → auto-forgiven
+            MERCY_THRESHOLD = 0.90       # >= 90% paid on time → auto-forgiven (no penalty)
+            HALF_RATE_THRESHOLD = 0.75   # >= 75% paid on time → half daily penalty rate
 
             if total_paid_by_due >= expected_by_this_month - TOLERANCE:
                 # Paid in full and on time — clean slate
@@ -476,13 +477,19 @@ def auto_insert_loan_penalties(db, group_id):
                 if days_late <= 0:
                     continue
 
-                base_penalty = days_late * daily_penalty  # full penalty if nothing paid
+                # ── 75% THRESHOLD: Use half the daily rate if ≥75% was paid on time ──
+                if percent_on_time >= HALF_RATE_THRESHOLD:
+                    effective_daily = daily_penalty / 2.0
+                else:
+                    effective_daily = daily_penalty
+
+                base_penalty = days_late * effective_daily  # daily rate may be halved
 
                 if percent_on_time > 0:
                     # PRE-DEADLINE PARTIAL PAYMENT MERCY
                     # The closer to 90% paid on time, the lower the penalty.
                     # Formula: penalty = base × (1 - pct_on_time / 0.90)
-                    # At 0% → full penalty; at 89% → ~1% of base; at 90% → 0
+                    # At 75% → uses half rate already; at 89% → ~1% of base; at 90% → 0
                     mercy_factor = 1.0 - (percent_on_time / MERCY_THRESHOLD)
                     penalty_amount = round(base_penalty * mercy_factor)
                 else:
@@ -503,12 +510,17 @@ def auto_insert_loan_penalties(db, group_id):
 
             # Upsert or remove penalty record
             cursor.execute("""
-                SELECT id FROM penalties
+                SELECT id, COALESCE(is_frozen, 0) AS is_frozen
+                FROM penalties
                 WHERE loan_id = %s AND group_id = %s
                   AND type = 'monthly_rejesho_late'
                   AND description LIKE %s
             """, (loan_id, group_id, f"%Month {month_num}%"))
             exists = cursor.fetchone()
+
+            # ── FREEZE: if penalty is frozen, do NOT update the amount ──
+            if exists and exists['is_frozen']:
+                continue  # Frozen — skip all accrual updates for this month
 
             if penalty_amount <= 0:
                 # No penalty due — delete any existing unpaid record
@@ -519,7 +531,12 @@ def auto_insert_loan_penalties(db, group_id):
                     """, (exists['id'],))
             else:
                 days_late = (today - month_due_date).days
-                desc = f"Month {month_num} rejesho overdue by {days_late} days"
+                # Label rate used so the description is transparent
+                if percent_on_time >= HALF_RATE_THRESHOLD and percent_on_time < MERCY_THRESHOLD:
+                    rate_note = f" (half-rate {int(daily_penalty/2):,}/day, ≥75% paid on time)"
+                else:
+                    rate_note = ""
+                desc = f"Month {month_num} rejesho overdue by {days_late} days{rate_note}"
                 if exists:
                     cursor.execute("""
                         UPDATE penalties SET amount = %s, description = %s, date = %s
@@ -646,8 +663,11 @@ def get_total_penalties_paid(db, group_id):
 
 def get_total_group_penalty_liability(db, group_id):
     cursor = get_cursor(db)
+    # Remaining = original amount - already paid - forgiven portion
     cursor.execute("""
-        SELECT SUM(amount - COALESCE(amount_paid, 0)) AS total_liability
+        SELECT SUM(
+            GREATEST(0, amount - COALESCE(amount_paid, 0) - COALESCE(forgiven_amount, 0))
+        ) AS total_liability
         FROM penalties
         WHERE group_id = %s
     """, (group_id,))
@@ -2390,6 +2410,9 @@ def get_penalties():
             p.amount,
             p.type,
             COALESCE(p.amount_paid, 0) AS amount_paid,
+            COALESCE(p.forgiven_amount, 0) AS forgiven_amount,
+            COALESCE(p.is_frozen, 0) AS is_frozen,
+            p.freeze_reason,
             p.description,
             p.date
         FROM penalties p
@@ -2400,7 +2423,7 @@ def get_penalties():
     ledger = cursor.fetchall()
 
     cursor.execute(
-        "SELECT SUM(amount - COALESCE(amount_paid, 0)) FROM penalties WHERE group_id = %s",
+        "SELECT SUM(GREATEST(0, amount - COALESCE(amount_paid, 0) - COALESCE(forgiven_amount, 0))) FROM penalties WHERE group_id = %s",
         (group_id,)
     )
     total_due = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
@@ -2514,6 +2537,114 @@ def record_penalty_payment(penalty_id):
         cursor.close()
         print(f"Error recording penalty payment: {e}")
         return jsonify({"error": "Database error while recording payment."}), 500
+
+
+
+@app.route('/api/penalties/<int:penalty_id>/freeze', methods=['POST'])
+def freeze_penalty(penalty_id):
+    """
+    Freeze or unfreeze a penalty. When frozen, daily accrual stops.
+    Body: { "freeze": true/false, "reason": "Illness" }
+    """
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    data = request.get_json()
+    freeze = bool(data.get("freeze", True))
+    reason = (data.get("reason") or "").strip()
+
+    if freeze and not reason:
+        return jsonify({"error": "A reason is required when freezing a penalty"}), 400
+
+    cursor = get_cursor(db)
+    try:
+        cursor.execute(
+            "SELECT id FROM penalties WHERE id = %s AND group_id = %s",
+            (penalty_id, group_id)
+        )
+        if not cursor.fetchone():
+            cursor.close()
+            return jsonify({"error": "Penalty not found"}), 404
+
+        cursor.execute(
+            """UPDATE penalties
+               SET is_frozen = %s,
+                   freeze_reason = %s
+               WHERE id = %s AND group_id = %s""",
+            (1 if freeze else 0, reason if freeze else None, penalty_id, group_id)
+        )
+        db.commit()
+        cursor.close()
+        action = "frozen" if freeze else "unfrozen"
+        return jsonify({"status": "success", "message": f"Penalty {action} successfully."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/penalties/<int:penalty_id>/forgive-amount', methods=['POST'])
+def forgive_penalty_amount(penalty_id):
+    """
+    Record a partial forgiveness amount on a penalty.
+    Body: { "forgiven_amount": 5000, "reason": "Group decision" }
+    Stored in forgiven_amount column; subtracted from remaining due.
+    The original amount is preserved for audit trail.
+    """
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    data = request.get_json()
+    try:
+        forgiven_amount = float(data.get("forgiven_amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "forgiven_amount must be a number"}), 400
+
+    if forgiven_amount < 0:
+        return jsonify({"error": "forgiven_amount cannot be negative"}), 400
+
+    reason = (data.get("reason") or "").strip()
+
+    cursor = get_cursor(db)
+    try:
+        cursor.execute(
+            "SELECT id, amount, COALESCE(amount_paid, 0) AS amount_paid FROM penalties WHERE id = %s AND group_id = %s",
+            (penalty_id, group_id)
+        )
+        penalty = cursor.fetchone()
+        if not penalty:
+            cursor.close()
+            return jsonify({"error": "Penalty not found"}), 404
+
+        max_forgivable = penalty['amount'] - penalty['amount_paid']
+        if forgiven_amount > max_forgivable:
+            cursor.close()
+            return jsonify({
+                "error": f"Cannot forgive more than the remaining due ({max_forgivable:,.0f} TZS)"
+            }), 400
+
+        forgiveness_note = f" | Forgiven {forgiven_amount:,.0f} TZS" + (f": {reason}" if reason else "")
+        cursor.execute(
+            """UPDATE penalties
+               SET forgiven_amount = %s,
+                   description = COALESCE(description, '') || %s
+               WHERE id = %s AND group_id = %s""",
+            (forgiven_amount, forgiveness_note, penalty_id, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({
+            "status": "success",
+            "message": f"Forgiven {forgiven_amount:,.0f} TZS from Penalty #{penalty_id}."
+        })
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/penalties/<int:penalty_id>', methods=['PUT', 'DELETE'])

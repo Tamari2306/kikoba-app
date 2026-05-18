@@ -69,6 +69,66 @@
     </div>
 </div>
 
+<!-- Freeze Penalty Modal -->
+<div class="modal fade" id="freezePenaltyModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-info text-white">
+                <h5 class="modal-title"><i class="bi bi-snow2 me-2"></i><span id="freezeModalTitle">Freeze Penalty</span></h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted" id="freezeModalHelp">Freezing stops daily accrual on this penalty.</p>
+                <input type="hidden" id="freezePenaltyId">
+                <input type="hidden" id="freezeAction">
+                <div class="mb-3" id="freezeReasonGroup">
+                    <label class="form-label fw-bold">Reason for Freezing <span class="text-danger">*</span></label>
+                    <input type="text" class="form-control" id="freezeReason" placeholder="e.g. Member hospitalised">
+                    <small class="text-muted">Required for accountability.</small>
+                </div>
+                <button class="btn btn-info text-white w-100" id="freezeConfirmBtn" onclick="submitFreeze()">
+                    <i class="bi bi-snow2 me-1"></i> Confirm
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Forgive Amount Modal -->
+<div class="modal fade" id="forgiveAmountModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title"><i class="bi bi-heart me-2"></i>Forgive Penalty Amount</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted">Enter the amount to forgive. The original penalty is preserved for audit purposes.</p>
+                <input type="hidden" id="forgiveAmountPenaltyId">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Member</label>
+                    <input type="text" class="form-control" id="forgiveAmountMember" disabled>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Remaining Due (TZS)</label>
+                    <input type="text" class="form-control" id="forgiveAmountRemaining" disabled>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Amount to Forgive (TZS) <span class="text-danger">*</span></label>
+                    <input type="number" class="form-control" id="forgiveAmountValue" min="1" placeholder="Enter amount to forgive">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Reason</label>
+                    <input type="text" class="form-control" id="forgiveAmountReason" placeholder="e.g. Group decision — illness, hardship">
+                </div>
+                <button class="btn btn-success w-100" onclick="submitForgiveAmount()">
+                    <i class="bi bi-heart me-1"></i> Confirm Forgiveness
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="card shadow-sm p-3">
     <div class="table-responsive">
         <table class="table table-hover align-middle" id="penalties-table">
@@ -77,12 +137,14 @@
                     <th>Member</th>
                     <th>Type</th>
                     <th>Original Amount</th>
-                    <th>Amount Paid</th>
+                    <th>Paid</th>
+                    <th>Forgiven</th>
                     <th class="text-danger">Remaining Due</th>
                     <th>Description</th>
-                    <th>Date Imposed</th>
+                    <th>Date</th>
+                    <th>Status</th>
                     <th>Payment</th>
-                    <th class="text-center">Edit</th>
+                    <th class="text-center">Actions</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -95,11 +157,10 @@ const API_MEMBERS = "/api/members";
 const API_PENALTIES = "/api/penalties";
 const API_PAYMENT = "/api/record_penalty_payment";
 
-function escapeHtml(s){ 
-    return (s===null||s===undefined) ? '' : String(s).replace(/[&<>"']/g, c=>({ 
-        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' 
-    })[c]); 
+function escapeHtml(s){
+    return (s===null||s===undefined)?'':String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 }
+function fmt(n){ return Number(n||0).toLocaleString(); }
 
 async function loadMembers() {
     const res = await fetch(API_MEMBERS);
@@ -116,72 +177,159 @@ async function loadPenalties() {
     const data = await res.json();
     const tbody = document.querySelector("#penalties-table tbody");
     tbody.innerHTML = "";
-
-    document.getElementById("total-penalty-due").innerText = data.total_outstanding.toLocaleString() + " TZS";
+    document.getElementById("total-penalty-due").innerText = fmt(data.total_outstanding) + " TZS";
 
     data.ledger.forEach(p => {
-        const typeBadge = p.type === "monthly_rejesho_late" 
-            ? `<span class="badge bg-danger">Auto Loan</span>` 
-            : p.type === "loan_forgiven"
-            ? `<span class="badge bg-success">Forgiven</span>`
-            : `<span class="badge bg-secondary">Manual</span>`;
-        const remaining = p.amount - p.amount_paid;
-        
         const isAutoLoan = p.type === "monthly_rejesho_late";
-        const isForgiven = p.type === "loan_forgiven";
-        
-        const paymentHtml = isForgiven ? `<span class="badge bg-success">N/A</span>` :
-            remaining > 0 ? 
-            `<button class="btn btn-sm btn-outline-danger pay-penalty-btn" 
-                     data-penalty-id="${p.id}"
-                     data-remaining-due="${remaining}"
-                     data-member-name="${p.member_name}">
-                Pay
-            </button>` :
-            `<span class="badge bg-success">Paid</span>`;
-        
-        const editHtml = isAutoLoan || isForgiven
-            ? `<span class="badge bg-secondary">${isForgiven ? 'Forgiven' : 'Auto'}</span>`
-            ? `<span class="badge bg-secondary">Auto</span>`
-            : `
+        const isLoanForgiven = p.type === "loan_forgiven";
+        const isFrozen = p.is_frozen === 1 || p.is_frozen === true;
+        const forgivenAmount = parseFloat(p.forgiven_amount || 0);
+        const remaining = Math.max(0, p.amount - p.amount_paid - forgivenAmount);
+
+        const typeBadge = isAutoLoan
+            ? `<span class="badge bg-danger">Auto Loan</span>`
+            : isLoanForgiven
+            ? `<span class="badge bg-success">Loan Forgiven</span>`
+            : `<span class="badge bg-secondary">Manual</span>`;
+
+        let statusBadge = '';
+        if (isFrozen) {
+            statusBadge = `<span class="badge bg-info text-white" title="${escapeHtml(p.freeze_reason||'')}"><i class="bi bi-snow2"></i> Frozen</span>`;
+            if (p.freeze_reason) statusBadge += `<br><small class="text-muted">${escapeHtml(p.freeze_reason)}</small>`;
+        } else if (remaining <= 0) {
+            statusBadge = `<span class="badge bg-success">Cleared</span>`;
+        } else {
+            statusBadge = `<span class="badge bg-warning text-dark">Pending</span>`;
+        }
+
+        const paymentHtml = isLoanForgiven ? `<span class="text-muted">N/A</span>` :
+            remaining > 0 ?
+            `<button class="btn btn-sm btn-outline-danger pay-penalty-btn"
+                     data-penalty-id="${p.id}" data-remaining-due="${remaining}"
+                     data-member-name="${escapeHtml(p.member_name)}">
+                <i class="bi bi-cash"></i> Pay
+            </button>` : `<span class="badge bg-success">Paid</span>`;
+
+        let actionsHtml = '';
+        if (!isLoanForgiven) {
+            if (remaining > 0) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-success forgive-amount-btn me-1" title="Forgive amount"
+                    data-id="${p.id}" data-member="${escapeHtml(p.member_name)}" data-remaining="${remaining}">
+                    <i class="bi bi-heart"></i></button>`;
+            }
+            if (isFrozen) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-secondary unfreeze-btn me-1" title="Unfreeze"
+                    data-id="${p.id}" data-member="${escapeHtml(p.member_name)}">
+                    <i class="bi bi-sun"></i></button>`;
+            } else if (isAutoLoan && remaining > 0) {
+                actionsHtml += `<button class="btn btn-sm btn-outline-info freeze-btn me-1" title="Freeze accrual"
+                    data-id="${p.id}" data-member="${escapeHtml(p.member_name)}">
+                    <i class="bi bi-snow2"></i></button>`;
+            }
+            if (!isAutoLoan) {
+                actionsHtml += `
                 <button class="btn btn-sm btn-outline-warning edit-penalty-btn"
-                        data-id="${p.id}"
-                        data-member="${p.member_name}"
-                        data-amount="${p.amount}"
-                        data-paid="${p.amount_paid}"
-                        data-desc="${escapeHtml(p.description || '')}">
-                    <i class="bi bi-pencil"></i>
-                </button>
-                <button class="btn btn-sm btn-outline-danger delete-penalty-btn"
-                        data-id="${p.id}"
-                        data-member="${p.member_name}">
-                    <i class="bi bi-trash"></i>
-                </button>
-            `;
-        
-        tbody.innerHTML += `<tr>
+                    data-id="${p.id}" data-member="${escapeHtml(p.member_name)}"
+                    data-amount="${p.amount}" data-paid="${p.amount_paid}"
+                    data-desc="${escapeHtml(p.description||'')}"><i class="bi bi-pencil"></i></button>
+                <button class="btn btn-sm btn-outline-danger delete-penalty-btn ms-1"
+                    data-id="${p.id}" data-member="${escapeHtml(p.member_name)}"><i class="bi bi-trash"></i></button>`;
+            }
+        }
+
+        tbody.innerHTML += `<tr class="${isFrozen?'table-info':''}">
             <td>${escapeHtml(p.member_name)}</td>
             <td>${typeBadge}</td>
-            <td>${Number(p.amount).toLocaleString()} TZS</td>
-            <td>${Number(p.amount_paid).toLocaleString()} TZS</td>
-            <td class="fw-bold ${remaining > 0 ? 'text-danger' : 'text-success'}">${remaining.toLocaleString()} TZS</td>
-            <td>${escapeHtml(p.description || '-')}</td>
+            <td>${fmt(p.amount)} TZS</td>
+            <td>${fmt(p.amount_paid)} TZS</td>
+            <td class="${forgivenAmount>0?'text-success fw-bold':'text-muted'}">${forgivenAmount>0?fmt(forgivenAmount)+' TZS':'—'}</td>
+            <td class="fw-bold ${remaining>0?'text-danger':'text-success'}">${fmt(remaining)} TZS</td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(p.description||'')}">${escapeHtml(p.description||'—')}</td>
             <td>${p.date}</td>
+            <td>${statusBadge}</td>
             <td>${paymentHtml}</td>
-            <td class="text-center">${editHtml}</td>
+            <td class="text-center">${actionsHtml||'<span class="text-muted">—</span>'}</td>
         </tr>`;
     });
-    
-    // Attach event listeners
-    document.querySelectorAll(".pay-penalty-btn").forEach(btn => {
-        btn.addEventListener('click', handlePayment);
-    });
-    document.querySelectorAll(".edit-penalty-btn").forEach(btn => {
-        btn.addEventListener('click', handleEdit);
-    });
-    document.querySelectorAll(".delete-penalty-btn").forEach(btn => {
-        btn.addEventListener('click', handleDelete);
-    });
+
+    document.querySelectorAll(".pay-penalty-btn").forEach(b=>b.addEventListener('click',handlePayment));
+    document.querySelectorAll(".edit-penalty-btn").forEach(b=>b.addEventListener('click',handleEdit));
+    document.querySelectorAll(".delete-penalty-btn").forEach(b=>b.addEventListener('click',handleDelete));
+    document.querySelectorAll(".freeze-btn").forEach(b=>b.addEventListener('click',openFreezeModal));
+    document.querySelectorAll(".unfreeze-btn").forEach(b=>b.addEventListener('click',openUnfreezeModal));
+    document.querySelectorAll(".forgive-amount-btn").forEach(b=>b.addEventListener('click',openForgiveAmountModal));
+}
+
+function openFreezeModal(e) {
+    const btn = e.currentTarget;
+    document.getElementById('freezePenaltyId').value = btn.dataset.id;
+    document.getElementById('freezeAction').value = 'freeze';
+    document.getElementById('freezeModalTitle').textContent = 'Freeze — ' + btn.dataset.member;
+    document.getElementById('freezeModalHelp').textContent = 'Freezing stops daily accrual. Provide a reason (e.g. hospitalisation, group decision).';
+    document.getElementById('freezeReasonGroup').style.display = '';
+    document.getElementById('freezeReason').value = '';
+    document.getElementById('freezeConfirmBtn').className = 'btn btn-info text-white w-100';
+    document.getElementById('freezeConfirmBtn').innerHTML = '<i class="bi bi-snow2 me-1"></i> Freeze Penalty';
+    new bootstrap.Modal(document.getElementById('freezePenaltyModal')).show();
+}
+
+function openUnfreezeModal(e) {
+    const btn = e.currentTarget;
+    document.getElementById('freezePenaltyId').value = btn.dataset.id;
+    document.getElementById('freezeAction').value = 'unfreeze';
+    document.getElementById('freezeModalTitle').textContent = 'Unfreeze — ' + btn.dataset.member;
+    document.getElementById('freezeModalHelp').textContent = 'Unfreezing will resume normal daily accrual on the next calculation run.';
+    document.getElementById('freezeReasonGroup').style.display = 'none';
+    document.getElementById('freezeConfirmBtn').className = 'btn btn-warning w-100';
+    document.getElementById('freezeConfirmBtn').innerHTML = '<i class="bi bi-sun me-1"></i> Unfreeze Penalty';
+    new bootstrap.Modal(document.getElementById('freezePenaltyModal')).show();
+}
+
+async function submitFreeze() {
+    const id = document.getElementById('freezePenaltyId').value;
+    const action = document.getElementById('freezeAction').value;
+    const freeze = action === 'freeze';
+    const reason = document.getElementById('freezeReason').value.trim();
+    if (freeze && !reason) return alert('Please enter a reason for freezing.');
+    try {
+        const res = await fetch(`${API_PENALTIES}/${id}/freeze`, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({freeze, reason})
+        });
+        const data = await res.json();
+        if (res.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('freezePenaltyModal')).hide();
+            await loadPenalties();
+        } else { alert(data.error || 'Failed.'); }
+    } catch(err){ alert('Network error.'); console.error(err); }
+}
+
+function openForgiveAmountModal(e) {
+    const btn = e.currentTarget;
+    document.getElementById('forgiveAmountPenaltyId').value = btn.dataset.id;
+    document.getElementById('forgiveAmountMember').value = btn.dataset.member;
+    document.getElementById('forgiveAmountRemaining').value = Number(btn.dataset.remaining).toLocaleString() + ' TZS';
+    document.getElementById('forgiveAmountValue').value = '';
+    document.getElementById('forgiveAmountReason').value = '';
+    new bootstrap.Modal(document.getElementById('forgiveAmountModal')).show();
+}
+
+async function submitForgiveAmount() {
+    const id = document.getElementById('forgiveAmountPenaltyId').value;
+    const forgiven_amount = parseFloat(document.getElementById('forgiveAmountValue').value);
+    const reason = document.getElementById('forgiveAmountReason').value.trim();
+    if (isNaN(forgiven_amount) || forgiven_amount <= 0) return alert('Please enter a valid amount.');
+    try {
+        const res = await fetch(`${API_PENALTIES}/${id}/forgive-amount`, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({forgiven_amount, reason})
+        });
+        const data = await res.json();
+        if (res.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('forgiveAmountModal')).hide();
+            await loadPenalties();
+        } else { alert(data.error || 'Failed.'); }
+    } catch(err){ alert('Network error.'); console.error(err); }
 }
 
 function handleEdit(e) {
@@ -191,7 +339,6 @@ function handleEdit(e) {
     document.getElementById('editPenaltyAmount').value = btn.dataset.amount;
     document.getElementById('editPenaltyPaid').value = Number(btn.dataset.paid).toLocaleString() + ' TZS';
     document.getElementById('editPenaltyDesc').value = btn.dataset.desc;
-    
     new bootstrap.Modal(document.getElementById('editPenaltyModal')).show();
 }
 
@@ -199,23 +346,13 @@ async function handleDelete(e) {
     const btn = e.currentTarget;
     const id = btn.dataset.id;
     const member = btn.dataset.member;
-
     if (!confirm(`Delete penalty for ${member}?`)) return;
-
     try {
-        const res = await fetch(`${API_PENALTIES}/${id}`, { method: 'DELETE' });
+        const res = await fetch(`${API_PENALTIES}/${id}`, {method:'DELETE'});
         const data = await res.json();
-
-        if (res.ok) {
-            alert(data.message || 'Penalty deleted');
-            loadPenalties();
-        } else {
-            alert(data.error || 'Failed to delete');
-        }
-    } catch (error) {
-        alert('Network error');
-        console.error(error);
-    }
+        if (res.ok) { await loadPenalties(); }
+        else { alert(data.error || 'Failed to delete'); }
+    } catch(error){ alert('Network error'); console.error(error); }
 }
 
 async function handlePayment(e) {
@@ -223,36 +360,20 @@ async function handlePayment(e) {
     const penaltyId = parseInt(btn.dataset.penaltyId);
     const remainingDue = parseFloat(btn.dataset.remainingDue);
     const memberName = btn.dataset.memberName;
-    
     if (remainingDue <= 0) return;
-    
     const amountStr = prompt(`Enter payment amount (TZS) for ${memberName}'s penalty (Max: ${remainingDue.toLocaleString()})`);
-    
     if (amountStr === null || amountStr.trim() === "") return;
-    
     const amount = parseFloat(amountStr);
-    
-    if (isNaN(amount) || amount <= 0) return alert("Invalid amount entered.");
-
+    if (isNaN(amount) || amount <= 0) return alert("Invalid amount.");
     try {
         const res = await fetch(`${API_PAYMENT}/${penaltyId}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ amount: amount })
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({amount})
         });
-
         const data = await res.json();
-
-        if (res.ok) {
-            alert(data.message);
-            await loadPenalties();
-        } else {
-            alert("Error recording payment: " + data.error);
-        }
-    } catch (e) {
-        alert("A network error occurred while processing the payment.");
-        console.error(e);
-    }
+        if (res.ok) { alert(data.message); await loadPenalties(); }
+        else { alert("Error: " + data.error); }
+    } catch(e){ alert("Network error."); console.error(e); }
 }
 
 document.getElementById("add-penalty-form").addEventListener("submit", async (e) => {
@@ -260,23 +381,17 @@ document.getElementById("add-penalty-form").addEventListener("submit", async (e)
     const member_id = document.getElementById("penalty-member-id").value;
     const amount = Number(document.getElementById("penalty-amount").value || 0);
     const description = document.getElementById("penalty-desc").value || '';
-    
     if(!member_id || amount <= 0) return alert("Select member and enter amount greater than zero.");
-
     const res = await fetch(API_PENALTIES, {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({member_id, type: 'manual', amount, description}) 
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({member_id, type:'manual', amount, description})
     });
-    
     const body = await res.json();
     if(res.ok && body.status === "success"){
         document.getElementById("penalty-amount").value = "";
         document.getElementById("penalty-desc").value = "";
         await loadPenalties();
-    } else {
-        alert(body.error || "Failed to add penalty");
-    }
+    } else { alert(body.error || "Failed to add penalty"); }
 });
 
 document.getElementById("edit-penalty-form").addEventListener("submit", async (e) => {
@@ -284,27 +399,18 @@ document.getElementById("edit-penalty-form").addEventListener("submit", async (e
     const id = document.getElementById('editPenaltyId').value;
     const amount = parseFloat(document.getElementById('editPenaltyAmount').value);
     const description = document.getElementById('editPenaltyDesc').value;
-
     try {
         const res = await fetch(`${API_PENALTIES}/${id}`, {
-            method: "PUT",
-            headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({ amount, description })
+            method:"PUT", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({amount, description})
         });
-
         const data = await res.json();
-
         if (res.ok) {
             alert(data.message || 'Penalty updated');
             bootstrap.Modal.getInstance(document.getElementById('editPenaltyModal')).hide();
             loadPenalties();
-        } else {
-            alert(data.error || 'Failed to update');
-        }
-    } catch (error) {
-        alert('Network error');
-        console.error(error);
-    }
+        } else { alert(data.error || 'Failed to update'); }
+    } catch(error){ alert('Network error'); console.error(error); }
 });
 
 loadMembers();
