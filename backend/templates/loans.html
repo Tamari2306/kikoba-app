@@ -82,6 +82,7 @@
                             <option value="Active">Active</option>
                             <option value="Overdue">Overdue</option>
                             <option value="Cleared">Cleared</option>
+                            <option value="Forgiven">Forgiven</option>
                         </select>
                     </div>
                     <button type="submit" class="btn btn-warning w-100 mb-2">
@@ -90,6 +91,53 @@
                 </form>
                 <button type="button" class="btn btn-danger w-100" id="deleteLoanBtn">
                     <i class="fas fa-trash me-1"></i> Delete Loan
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Forgive Loan Modal -->
+<div class="modal fade" id="forgiveLoanModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title"><i class="fas fa-heart me-2"></i>Forgive Loan</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info">
+                    <strong>ℹ️ Loan Forgiveness</strong> cancels all outstanding penalties for this loan
+                    and marks it as <strong>Forgiven</strong>. This is for exceptional circumstances only
+                    (e.g. critical illness, death, severe hardship). A reason is required.
+                </div>
+                <input type="hidden" id="forgiveLoanId">
+                <input type="hidden" id="forgiveLoanMember">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Member</label>
+                    <input type="text" class="form-control" id="forgiveLoanMemberDisplay" disabled>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Reason for Forgiveness <span class="text-danger">*</span></label>
+                    <select class="form-select mb-2" id="forgiveReasonPreset">
+                        <option value="">— Select a reason or type below —</option>
+                        <option value="Critical illness of member">Critical illness of member</option>
+                        <option value="Death of member">Death of member</option>
+                        <option value="Death of immediate family member">Death of immediate family member</option>
+                        <option value="Severe financial hardship">Severe financial hardship</option>
+                        <option value="Natural disaster / loss of property">Natural disaster / loss of property</option>
+                        <option value="Group decision / special circumstance">Group decision / special circumstance</option>
+                        <option value="Other">Other (specify below)</option>
+                    </select>
+                    <textarea class="form-control" id="forgiveReason" rows="2"
+                              placeholder="Additional details (optional if reason selected above)"></textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Approved By</label>
+                    <input type="text" class="form-control" id="forgiveApprovedBy" placeholder="Name of approving official">
+                </div>
+                <button class="btn btn-success w-100" id="confirmForgiveBtn">
+                    <i class="fas fa-check me-1"></i> Confirm Forgiveness
                 </button>
             </div>
         </div>
@@ -148,11 +196,27 @@ async function loadLoans() {
         const statusClass = {
             'Active': 'success',
             'Overdue': 'danger',
-            'Cleared': 'secondary'
+            'Cleared': 'secondary',
+            'Forgiven': 'info'
         }[loan.status] || 'secondary';
 
+        const isForgiven = loan.status === 'Forgiven';
+        const forgiveBtn = !isForgiven
+            ? `<button class="btn btn-sm btn-outline-success forgive-btn"
+                       data-id="${loan.loan_id}"
+                       data-member="${loan.member_name}"
+                       title="Forgive this loan">
+                   <i class="fas fa-heart"></i>
+               </button>`
+            : `<button class="btn btn-sm btn-outline-secondary unforgive-btn"
+                       data-id="${loan.loan_id}"
+                       data-member="${loan.member_name}"
+                       title="Reverse forgiveness">
+                   <i class="fas fa-undo"></i>
+               </button>`;
+
         return `
-            <tr>
+            <tr class="${isForgiven ? 'table-light text-muted' : ''}">
                 <td class="fw-bold">${loan.member_name}</td>
                 <td class="text-end">${loan.principal.toLocaleString()} TZS</td>
                 <td class="text-end text-danger">${loan.interest.toLocaleString()} TZS</td>
@@ -161,8 +225,8 @@ async function loadLoans() {
                 <td class="text-end text-info"><strong>${loan.monthly_rejesho.toLocaleString()} TZS</strong></td>
                 <td class="text-end">${loan.principal.toLocaleString()} TZS</td>
                 <td class="text-end">${loan.amount_returned.toLocaleString()} TZS</td>
-                <td class="text-end ${loan.remaining > 0 ? 'text-danger' : 'text-success'}">
-                    <strong>${loan.remaining.toLocaleString()} TZS</strong>
+                <td class="text-end ${loan.remaining > 0 && !isForgiven ? 'text-danger' : 'text-success'}">
+                    <strong>${isForgiven ? '<span class="badge bg-info">Forgiven</span>' : loan.remaining.toLocaleString() + ' TZS'}</strong>
                 </td>
                 <td>${loan.start_date}</td>
                 <td>${loan.due_date}</td>
@@ -177,6 +241,7 @@ async function loadLoans() {
                             data-status="${loan.status}">
                         <i class="fas fa-edit"></i>
                     </button>
+                    ${forgiveBtn}
                 </td>
             </tr>
         `;
@@ -184,6 +249,12 @@ async function loadLoans() {
 
     document.querySelectorAll('.edit-btn').forEach(btn => {
         btn.addEventListener('click', handleEdit);
+    });
+    document.querySelectorAll('.forgive-btn').forEach(btn => {
+        btn.addEventListener('click', handleForgive);
+    });
+    document.querySelectorAll('.unforgive-btn').forEach(btn => {
+        btn.addEventListener('click', handleUnforgive);
     });
 }
 
@@ -194,6 +265,64 @@ function handleEdit(e) {
     document.getElementById('editLoanStatus').value = btn.dataset.status;
     new bootstrap.Modal(document.getElementById('editLoanModal')).show();
 }
+
+function handleForgive(e) {
+    const btn = e.currentTarget;
+    document.getElementById('forgiveLoanId').value = btn.dataset.id;
+    document.getElementById('forgiveLoanMemberDisplay').value = btn.dataset.member;
+    document.getElementById('forgiveReason').value = '';
+    document.getElementById('forgiveReasonPreset').value = '';
+    document.getElementById('forgiveApprovedBy').value = '';
+    new bootstrap.Modal(document.getElementById('forgiveLoanModal')).show();
+}
+
+async function handleUnforgive(e) {
+    const btn = e.currentTarget;
+    const loanId = btn.dataset.id;
+    const member = btn.dataset.member;
+    if (!confirm(`Reverse forgiveness for ${member}'s loan? Penalties will be recalculated.`)) return;
+    try {
+        const res = await fetch(`/api/loans/${loanId}/unforgive`, { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            alert(data.message || 'Forgiveness reversed.');
+            loadLoans();
+        } else {
+            alert(data.error || 'Failed to reverse forgiveness.');
+        }
+    } catch (err) {
+        alert('Network error.');
+    }
+}
+
+document.getElementById('confirmForgiveBtn').addEventListener('click', async () => {
+    const loanId = document.getElementById('forgiveLoanId').value;
+    const preset = document.getElementById('forgiveReasonPreset').value;
+    const custom = document.getElementById('forgiveReason').value.trim();
+    const approvedBy = document.getElementById('forgiveApprovedBy').value.trim() || 'Admin';
+    const reason = preset && preset !== 'Other' ? preset + (custom ? ` — ${custom}` : '') : custom;
+    if (!reason) {
+        alert('Please select or enter a reason for forgiveness.');
+        return;
+    }
+    try {
+        const res = await fetch(`/api/loans/${loanId}/forgive`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason, forgiven_by: approvedBy })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            bootstrap.Modal.getInstance(document.getElementById('forgiveLoanModal')).hide();
+            alert(data.message || 'Loan forgiven successfully.');
+            loadLoans();
+        } else {
+            alert(data.error || 'Failed to forgive loan.');
+        }
+    } catch (err) {
+        alert('Network error.');
+    }
+});
 
 // Live loan preview
 document.getElementById('loanPrincipal').addEventListener('input', async function() {

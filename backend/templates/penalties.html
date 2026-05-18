@@ -122,12 +122,16 @@ async function loadPenalties() {
     data.ledger.forEach(p => {
         const typeBadge = p.type === "monthly_rejesho_late" 
             ? `<span class="badge bg-danger">Auto Loan</span>` 
+            : p.type === "loan_forgiven"
+            ? `<span class="badge bg-success">Forgiven</span>`
             : `<span class="badge bg-secondary">Manual</span>`;
         const remaining = p.amount - p.amount_paid;
         
         const isAutoLoan = p.type === "monthly_rejesho_late";
+        const isForgiven = p.type === "loan_forgiven";
         
-        const paymentHtml = remaining > 0 ? 
+        const paymentHtml = isForgiven ? `<span class="badge bg-success">N/A</span>` :
+            remaining > 0 ? 
             `<button class="btn btn-sm btn-outline-danger pay-penalty-btn" 
                      data-penalty-id="${p.id}"
                      data-remaining-due="${remaining}"
@@ -136,7 +140,8 @@ async function loadPenalties() {
             </button>` :
             `<span class="badge bg-success">Paid</span>`;
         
-        const editHtml = isAutoLoan 
+        const editHtml = isAutoLoan || isForgiven
+            ? `<span class="badge bg-secondary">${isForgiven ? 'Forgiven' : 'Auto'}</span>`
             ? `<span class="badge bg-secondary">Auto</span>`
             : `
                 <button class="btn btn-sm btn-outline-warning edit-penalty-btn"

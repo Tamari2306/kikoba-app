@@ -362,6 +362,11 @@ def update_loan_status(db, loan_id, group_id):
     if not loan:
         cursor.close()
         return
+
+    # Never override a Forgiven status through automatic recalculation
+    if loan["status"] == "Forgiven":
+        cursor.close()
+        return
     
     cursor.execute(
         "SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s",
@@ -437,58 +442,96 @@ def auto_insert_loan_penalties(db, group_id):
             if today <= month_due_date:
                 continue
             
+            # Paid ON OR BEFORE this month's deadline
             cursor.execute("""
-                SELECT SUM(amount) FROM rejesho 
-                WHERE loan_id = %s AND group_id = %s
-                  AND date <= %s
+                SELECT SUM(amount) FROM rejesho
+                WHERE loan_id = %s AND group_id = %s AND date <= %s
             """, (loan_id, group_id, month_due_date.strftime("%Y-%m-%d")))
-            total_paid = get_single_value(cursor, 0)
-            
+            total_paid_by_due = get_single_value(cursor, 0)
+
+            # Total ever paid (including late payments) up to today
+            cursor.execute("""
+                SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s
+            """, (loan_id, group_id))
+            total_paid_all_time = get_single_value(cursor, 0)
+
+            TOLERANCE = 1.0
             expected_by_this_month = monthly_rejesho * month_num
-            TOLERANCE = 1.0  # within 1 TZS handles float rounding (e.g. 33333 vs 33333.33)
-            
-            if total_paid < expected_by_this_month - TOLERANCE:
+            expected_prev_months   = monthly_rejesho * (month_num - 1)
+
+            # Amount specifically for THIS month paid on time / late
+            this_month_paid_on_time = max(0.0, total_paid_by_due - expected_prev_months)
+            percent_on_time = min(1.0, this_month_paid_on_time / monthly_rejesho) if monthly_rejesho > 0 else 1.0
+
+            MERCY_THRESHOLD = 0.90  # >= 90% paid on time → auto-forgiven
+
+            if total_paid_by_due >= expected_by_this_month - TOLERANCE:
+                # Paid in full and on time — clean slate
+                penalty_amount = 0
+            elif percent_on_time >= MERCY_THRESHOLD:
+                # Paid >= 90% of this month's rejesho on time — auto-forgiven
+                penalty_amount = 0
+            else:
                 days_late = (today - month_due_date).days
-                
                 if days_late <= 0:
                     continue
-                
-                penalty_amount = days_late * daily_penalty
-                
-                cursor.execute("""
-                    SELECT id, amount FROM penalties
-                    WHERE loan_id = %s AND group_id = %s 
-                      AND type = 'monthly_rejesho_late'
-                      AND description LIKE %s
-                """, (loan_id, group_id, f"%Month {month_num}%"))
-                exists = cursor.fetchone()
-                
+
+                base_penalty = days_late * daily_penalty  # full penalty if nothing paid
+
+                if percent_on_time > 0:
+                    # PRE-DEADLINE PARTIAL PAYMENT MERCY
+                    # The closer to 90% paid on time, the lower the penalty.
+                    # Formula: penalty = base × (1 - pct_on_time / 0.90)
+                    # At 0% → full penalty; at 89% → ~1% of base; at 90% → 0
+                    mercy_factor = 1.0 - (percent_on_time / MERCY_THRESHOLD)
+                    penalty_amount = round(base_penalty * mercy_factor)
+                else:
+                    # Nothing paid on time — check for late partial payment mercy
+                    # Amount of this month's rejesho still unpaid as of today
+                    cumulative_this_month = max(0.0, total_paid_all_time - expected_prev_months)
+                    this_month_paid_late = max(0.0, min(cumulative_this_month, monthly_rejesho))
+                    unpaid_ratio = max(0.0, (monthly_rejesho - this_month_paid_late) / monthly_rejesho)
+
+                    if unpaid_ratio < 1.0 - TOLERANCE / monthly_rejesho:
+                        # POST-DEADLINE PARTIAL PAYMENT
+                        # Penalise only the unpaid portion.
+                        # Formula: penalty = base × unpaid_ratio
+                        # Full payment after deadline → near-zero penalty; nothing → full penalty
+                        penalty_amount = round(base_penalty * unpaid_ratio)
+                    else:
+                        penalty_amount = round(base_penalty)
+
+            # Upsert or remove penalty record
+            cursor.execute("""
+                SELECT id FROM penalties
+                WHERE loan_id = %s AND group_id = %s
+                  AND type = 'monthly_rejesho_late'
+                  AND description LIKE %s
+            """, (loan_id, group_id, f"%Month {month_num}%"))
+            exists = cursor.fetchone()
+
+            if penalty_amount <= 0:
+                # No penalty due — delete any existing unpaid record
                 if exists:
                     cursor.execute("""
-                        UPDATE penalties 
-                        SET amount = %s, description = %s, date = %s
+                        DELETE FROM penalties
+                        WHERE id = %s AND COALESCE(amount_paid, 0) = 0
+                    """, (exists['id'],))
+            else:
+                days_late = (today - month_due_date).days
+                desc = f"Month {month_num} rejesho overdue by {days_late} days"
+                if exists:
+                    cursor.execute("""
+                        UPDATE penalties SET amount = %s, description = %s, date = %s
                         WHERE id = %s
-                    """, (penalty_amount, f"Month {month_num} rejesho overdue by {days_late} days", today.strftime("%Y-%m-%d"), exists['id']))
+                    """, (penalty_amount, desc, today.strftime("%Y-%m-%d"), exists['id']))
                 else:
                     cursor.execute("""
                         INSERT INTO penalties (
-                            group_id, member_id, loan_id, type, amount,
-                            description, date
+                            group_id, member_id, loan_id, type, amount, description, date
                         ) VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s)
-                    """, (
-                        group_id, member_id, loan_id, penalty_amount,
-                        f"Month {month_num} rejesho overdue by {days_late} days",
-                        today.strftime("%Y-%m-%d")
-                    ))
-            else:
-                # Payment received for this month — remove any existing late penalty for it
-                cursor.execute("""
-                    DELETE FROM penalties
-                    WHERE loan_id = %s AND group_id = %s
-                      AND type = 'monthly_rejesho_late'
-                      AND description LIKE %s
-                      AND status != 'Paid'
-                """, (loan_id, group_id, f"%Month {month_num}%"))
+                    """, (group_id, member_id, loan_id, penalty_amount, desc,
+                          today.strftime("%Y-%m-%d")))
         
         cursor.execute("""
             SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s
@@ -1919,7 +1962,7 @@ def edit_loan(loan_id):
     due_date_str = data.get('due_date', '').strip()
     status = data.get('status', '').strip()
     
-    if status not in ['Active', 'Overdue', 'Cleared']:
+    if status not in ['Active', 'Overdue', 'Cleared', 'Forgiven']:
         cursor.close()
         return jsonify({"error": "Invalid status"}), 400
     
@@ -1940,6 +1983,102 @@ def edit_loan(loan_id):
         db.rollback()
         cursor.close()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/loans/<int:loan_id>/forgive', methods=['POST'])
+def forgive_loan(loan_id):
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+    data = request.get_json()
+    reason = (data.get("reason") or "").strip()
+    forgiven_by = (data.get("forgiven_by") or "Admin").strip()
+    if not reason:
+        return jsonify({"error": "A forgiveness reason is required"}), 400
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, member_id, principal, status FROM loans WHERE id = %s AND group_id = %s",
+        (loan_id, group_id)
+    )
+    loan = cursor.fetchone()
+    if not loan:
+        cursor.close()
+        return jsonify({"error": "Loan not found"}), 404
+    if loan['status'] == 'Forgiven':
+        cursor.close()
+        return jsonify({"error": "Loan is already forgiven"}), 400
+    try:
+        try:
+            cursor.execute("ALTER TABLE loans ADD COLUMN IF NOT EXISTS forgiven INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE loans ADD COLUMN IF NOT EXISTS forgiveness_reason TEXT")
+            cursor.execute("ALTER TABLE loans ADD COLUMN IF NOT EXISTS forgiven_by TEXT")
+            cursor.execute("ALTER TABLE loans ADD COLUMN IF NOT EXISTS forgiven_at TEXT")
+            db.commit()
+        except Exception:
+            db.rollback()
+        cursor.execute(
+            "UPDATE loans SET status = 'Forgiven', forgiven = 1, forgiveness_reason = %s, forgiven_by = %s, forgiven_at = %s WHERE id = %s AND group_id = %s",
+            (reason, forgiven_by, __import__('datetime').datetime.now().strftime("%Y-%m-%d"), loan_id, group_id)
+        )
+        cursor.execute(
+            "DELETE FROM penalties WHERE loan_id = %s AND group_id = %s AND type = 'monthly_rejesho_late' AND COALESCE(amount_paid, 0) = 0",
+            (loan_id, group_id)
+        )
+        cursor.execute(
+            "INSERT INTO penalties (group_id, member_id, loan_id, type, amount, description, date) VALUES (%s, %s, %s, 'loan_forgiven', 0, %s, %s)",
+            (group_id, loan['member_id'], loan_id,
+             "Loan forgiven \u2014 " + reason + " (by " + forgiven_by + ")",
+             __import__('datetime').datetime.now().strftime("%Y-%m-%d"))
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success", "message": "Loan has been forgiven and penalties cleared."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/loans/<int:loan_id>/unforgive', methods=['POST'])
+def unforgive_loan(loan_id):
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, due_date, status FROM loans WHERE id = %s AND group_id = %s",
+        (loan_id, group_id)
+    )
+    loan = cursor.fetchone()
+    if not loan:
+        cursor.close()
+        return jsonify({"error": "Loan not found"}), 404
+    if loan['status'] != 'Forgiven':
+        cursor.close()
+        return jsonify({"error": "Loan is not currently forgiven"}), 400
+    try:
+        from datetime import datetime as _dt
+        due_date = _dt.strptime(loan['due_date'], "%Y-%m-%d").date()
+        new_status = 'Overdue' if _dt.now().date() > due_date else 'Active'
+        cursor.execute(
+            "UPDATE loans SET status = %s, forgiven = 0, forgiveness_reason = NULL, forgiven_by = NULL, forgiven_at = NULL WHERE id = %s AND group_id = %s",
+            (new_status, loan_id, group_id)
+        )
+        cursor.execute(
+            "DELETE FROM penalties WHERE loan_id = %s AND group_id = %s AND type = 'loan_forgiven'",
+            (loan_id, group_id)
+        )
+        db.commit()
+        cursor.close()
+        auto_insert_loan_penalties(db, group_id)
+        return jsonify({"status": "success", "message": "Loan forgiveness reversed. Status: " + new_status})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
 
 
 @app.route('/loans-page/download', methods=['GET'])
