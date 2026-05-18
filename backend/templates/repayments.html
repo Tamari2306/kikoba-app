@@ -81,6 +81,7 @@
                     <tr>
                         <th>Date</th>
                         <th class="text-end">Amount Paid (TZS)</th>
+                        <th class="text-center">Action</th>
                     </tr>
                 </thead>
                 <tbody id="repayment-history-table"></tbody>
@@ -167,7 +168,7 @@
         tbody.innerHTML = '';
 
         if (repayments.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="2" class="text-center text-muted">No repayments recorded yet.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">No repayments recorded yet.</td></tr>';
             return;
         }
 
@@ -175,9 +176,31 @@
             const row = `<tr>
                 <td>${r.date}</td>
                 <td class="text-end fw-bold">${r.amount.toLocaleString()} TZS</td>
+                <td class="text-center">
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteRejesho(${r.id})" title="Delete this repayment">
+                        <i class="bi bi-trash"></i> Delete
+                    </button>
+                </td>
             </tr>`;
             tbody.innerHTML += row;
         });
+    }
+
+    async function deleteRejesho(rejeshoId) {
+        if (!confirm('Are you sure you want to delete this repayment record? This cannot be undone.')) return;
+
+        try {
+            const res = await fetch(`/api/rejesho/${rejeshoId}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (res.ok) {
+                loadRepaymentHistory(loanId);
+            } else {
+                alert('Error: ' + (data.error || 'Failed to delete repayment.'));
+            }
+        } catch (error) {
+            alert('Network error while deleting repayment.');
+            console.error(error);
+        }
     }
 
     async function handleRecordRepayment() {

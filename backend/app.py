@@ -440,12 +440,14 @@ def auto_insert_loan_penalties(db, group_id):
             cursor.execute("""
                 SELECT SUM(amount) FROM rejesho 
                 WHERE loan_id = %s AND group_id = %s
-            """, (loan_id, group_id))
+                  AND date <= %s
+            """, (loan_id, group_id, month_due_date.strftime("%Y-%m-%d")))
             total_paid = get_single_value(cursor, 0)
             
             expected_by_this_month = monthly_rejesho * month_num
+            TOLERANCE = 1.0  # within 1 TZS handles float rounding (e.g. 33333 vs 33333.33)
             
-            if total_paid < expected_by_this_month:
+            if total_paid < expected_by_this_month - TOLERANCE:
                 days_late = (today - month_due_date).days
                 
                 if days_late <= 0:
@@ -478,6 +480,15 @@ def auto_insert_loan_penalties(db, group_id):
                         f"Month {month_num} rejesho overdue by {days_late} days",
                         today.strftime("%Y-%m-%d")
                     ))
+            else:
+                # Payment received for this month — remove any existing late penalty for it
+                cursor.execute("""
+                    DELETE FROM penalties
+                    WHERE loan_id = %s AND group_id = %s
+                      AND type = 'monthly_rejesho_late'
+                      AND description LIKE %s
+                      AND status != 'Paid'
+                """, (loan_id, group_id, f"%Month {month_num}%"))
         
         cursor.execute("""
             SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s
@@ -2147,7 +2158,7 @@ def get_rejesho_history(loan_id):
         return jsonify({"error": "Loan not found"}), 404
     
     cursor.execute(
-        "SELECT amount, date FROM rejesho WHERE loan_id = %s AND group_id = %s ORDER BY date DESC",
+        "SELECT id, amount, date FROM rejesho WHERE loan_id = %s AND group_id = %s ORDER BY date DESC",
         (loan_id, group_id)
     )
     repayments = cursor.fetchall()
@@ -2177,6 +2188,42 @@ def get_rejesho_history(loan_id):
         },
         "repayments": [dict(r) for r in repayments]
     })
+
+
+@app.route('/api/rejesho/<int:rejesho_id>', methods=['DELETE'])
+def delete_rejesho(rejesho_id):
+    db = get_db()
+    group_id = get_current_group_id()
+
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    cursor = get_cursor(db)
+    # Fetch the rejesho record to confirm it belongs to this group
+    cursor.execute(
+        "SELECT id, loan_id FROM rejesho WHERE id = %s AND group_id = %s",
+        (rejesho_id, group_id)
+    )
+    record = cursor.fetchone()
+
+    if not record:
+        cursor.close()
+        return jsonify({"error": "Rejesho record not found"}), 404
+
+    loan_id = record['loan_id']
+
+    cursor.execute(
+        "DELETE FROM rejesho WHERE id = %s AND group_id = %s",
+        (rejesho_id, group_id)
+    )
+    db.commit()
+    cursor.close()
+
+    # Recalculate loan status and penalties after deletion
+    update_loan_status(db, loan_id, group_id)
+    auto_insert_loan_penalties(db, group_id)
+
+    return jsonify({"status": "success", "message": "Rejesho deleted successfully"})
 
 
 # ==================== PENALTIES ====================
