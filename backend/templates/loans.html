@@ -41,13 +41,19 @@
                     </div>
                     <div id="loanPreview" class="alert alert-info d-none mt-3">
                         <h6>Loan Preview:</h6>
+                        <p class="mb-1"><strong>Start Date:</strong> <span id="previewStartDate">-</span></p>
                         <p class="mb-1"><strong>Principal:</strong> <span id="previewPrincipal">0</span> TZS</p>
                         <p class="mb-1"><strong>Interest (deducted):</strong> <span id="previewInterest">0</span> TZS</p>
-                        <p class="mb-1"><strong>Net Amount (member receives):</strong> <span id="previewNetAmount" class="text-success">0</span> TZS</p>
+                        <p class="mb-1"><strong>Net Amount (member receives):</strong> <span id="previewNetAmount" class="text-success fw-bold">0</span> TZS</p>
                         <p class="mb-1"><strong>Duration:</strong> <span id="previewMonths">0</span> months</p>
                         <p class="mb-1"><strong>Monthly Rejesho:</strong> <span id="previewMonthlyRejesho">0</span> TZS</p>
                         <p class="mb-0"><strong>Due Date:</strong> <span id="previewDueDate">-</span></p>
+                        <!-- Shown only when duration is capped by cycle end -->
+                        <div id="previewWarning" class="alert alert-warning mt-2 mb-0 d-none py-1 px-2">
+                            <small id="previewWarningText"></small>
+                        </div>
                     </div>
+                    <div id="previewError" class="alert alert-danger d-none mt-2"></div>
                     <button type="submit" class="btn btn-success w-100">
                         <i class="fas fa-check me-1"></i> Approve Loan
                     </button>
@@ -173,11 +179,14 @@
 <script>
 const API = "/api/loans";
 const MEMBERS_API = "/api/members";
-let currentSettings = {};
 
-async function loadSettings() {
-    const res = await fetch("/api/settings");
-    currentSettings = await res.json();
+// ── Debounce helper ────────────────────────────────────────────────────────
+function debounce(fn, delay) {
+    let timer;
+    return function(...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), delay);
+    };
 }
 
 async function loadMembers() {
@@ -235,8 +244,8 @@ async function loadLoans() {
                     <button class="btn btn-sm btn-outline-info" onclick="window.location.href='/repayments-page?loan_id=${loan.loan_id}'">
                         <i class="fas fa-eye"></i>
                     </button>
-                    <button class="btn btn-sm btn-outline-warning edit-btn" 
-                            data-id="${loan.loan_id}" 
+                    <button class="btn btn-sm btn-outline-warning edit-btn"
+                            data-id="${loan.loan_id}"
                             data-due-date="${loan.due_date}"
                             data-status="${loan.status}">
                         <i class="fas fa-edit"></i>
@@ -247,15 +256,9 @@ async function loadLoans() {
         `;
     }).join("");
 
-    document.querySelectorAll('.edit-btn').forEach(btn => {
-        btn.addEventListener('click', handleEdit);
-    });
-    document.querySelectorAll('.forgive-btn').forEach(btn => {
-        btn.addEventListener('click', handleForgive);
-    });
-    document.querySelectorAll('.unforgive-btn').forEach(btn => {
-        btn.addEventListener('click', handleUnforgive);
-    });
+    document.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', handleEdit));
+    document.querySelectorAll('.forgive-btn').forEach(btn => btn.addEventListener('click', handleForgive));
+    document.querySelectorAll('.unforgive-btn').forEach(btn => btn.addEventListener('click', handleUnforgive));
 }
 
 function handleEdit(e) {
@@ -324,55 +327,68 @@ document.getElementById('confirmForgiveBtn').addEventListener('click', async () 
     }
 });
 
-// Live loan preview
-document.getElementById('loanPrincipal').addEventListener('input', async function() {
-    const principal = parseFloat(this.value) || 0;
-    
-    if (principal <= 0) {
-        document.getElementById('loanPreview').classList.add('d-none');
-        return;
-    }
+// ── FIX: Live loan preview — calls /api/loans/preview so cycle end date is applied ──
+// The old code computed months entirely in JS using currentSettings, which had no
+// knowledge of cycle_end_date. This version asks the backend, which enforces the cap.
+const debouncedPreview = debounce(async function() {
+    const principal = parseFloat(document.getElementById('loanPrincipal').value) || 0;
+    const previewBox  = document.getElementById('loanPreview');
+    const errorBox    = document.getElementById('previewError');
+    const warningBox  = document.getElementById('previewWarning');
 
-    const interestRate = parseFloat(currentSettings.interest_rate) || 0.10;
-    const interest = Math.round(principal * interestRate);
-    const netAmount = principal - interest;
+    // Hide everything while typing
+    previewBox.classList.add('d-none');
+    errorBox.classList.add('d-none');
+    warningBox.classList.add('d-none');
 
-    // Determine months based on loan tiers
-    const tiers = [
-        { max: parseFloat(currentSettings.loan_tier1_amount), months: parseInt(currentSettings.loan_tier1_months) },
-        { max: parseFloat(currentSettings.loan_tier2_amount), months: parseInt(currentSettings.loan_tier2_months) },
-        { max: parseFloat(currentSettings.loan_tier3_amount), months: parseInt(currentSettings.loan_tier3_months) },
-        { max: parseFloat(currentSettings.loan_tier4_amount), months: parseInt(currentSettings.loan_tier4_months) },
-        { max: parseFloat(currentSettings.loan_tier5_amount), months: parseInt(currentSettings.loan_tier5_months) }  
-    ];
+    if (principal <= 0) return;
 
-    let months = 1;
-    for (const tier of tiers) {
-        if (principal <= tier.max) {
-            months = tier.months;
-            break;
+    try {
+        const res = await fetch('/api/loans/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ principal })
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+            // Backend returned an error (e.g. cycle ended, amount too large)
+            errorBox.textContent = data.error || 'Cannot calculate preview.';
+            errorBox.classList.remove('d-none');
+            return;
         }
+
+        // Populate preview fields
+        document.getElementById('previewStartDate').textContent     = data.start_date;
+        document.getElementById('previewPrincipal').textContent     = Number(data.principal).toLocaleString();
+        document.getElementById('previewInterest').textContent      = Number(data.interest).toLocaleString();
+        document.getElementById('previewNetAmount').textContent     = Number(data.net_amount).toLocaleString();
+        document.getElementById('previewMonths').textContent        = data.months;
+        document.getElementById('previewMonthlyRejesho').textContent = Number(data.monthly_rejesho).toLocaleString();
+        document.getElementById('previewDueDate').textContent       = data.due_date;
+
+        // Show cycle-cap warning if months were reduced
+        if (data.warning) {
+            document.getElementById('previewWarningText').textContent = data.warning;
+            warningBox.classList.remove('d-none');
+        }
+
+        previewBox.classList.remove('d-none');
+
+    } catch (err) {
+        errorBox.textContent = 'Network error — could not load preview.';
+        errorBox.classList.remove('d-none');
+        console.error(err);
     }
+}, 400); // 400 ms debounce — fires after user stops typing
 
-    const monthlyRejesho = Math.round(principal / months);
-    const today = new Date();
-    const dueDate = new Date(today);
-    dueDate.setMonth(dueDate.getMonth() + months);
-
-    document.getElementById('previewPrincipal').textContent = principal.toLocaleString();
-    document.getElementById('previewInterest').textContent = interest.toLocaleString();
-    document.getElementById('previewNetAmount').textContent = netAmount.toLocaleString();
-    document.getElementById('previewMonths').textContent = months;
-    document.getElementById('previewMonthlyRejesho').textContent = monthlyRejesho.toLocaleString();
-    document.getElementById('previewDueDate').textContent = dueDate.toISOString().split('T')[0];
-
-    document.getElementById('loanPreview').classList.remove('d-none');
-});
+document.getElementById('loanPrincipal').addEventListener('input', debouncedPreview);
+// ── END FIX ──
 
 document.getElementById("add-loan-form").addEventListener("submit", async e => {
     e.preventDefault();
-    const member_id = loanMember.value;
-    const principal = loanPrincipal.value;
+    const member_id = document.getElementById('loanMember').value;
+    const principal = document.getElementById('loanPrincipal').value;
 
     const res = await fetch(API, {
         method: "POST",
@@ -383,23 +399,23 @@ document.getElementById("add-loan-form").addEventListener("submit", async e => {
     const data = await res.json();
 
     if (res.ok) {
-        let message = `✅ Loan approved!\n\nMember receives: ${data.net_amount.toLocaleString()} TZS\nMonthly rejesho: ${data.monthly_rejesho.toLocaleString()} TZS`;
-        
+        let message = `✅ Loan approved!\n\nStart date: ${data.start_date}\nDuration: ${data.months} month(s)\nMember receives: ${Number(data.net_amount).toLocaleString()} TZS\nMonthly rejesho: ${Number(data.monthly_rejesho).toLocaleString()} TZS\nDue date: ${data.due_date}`;
+
         if (data.warning) {
             message += `\n\n⚠️ ${data.warning}`;
         }
-        
+
         alert(message);
-        bootstrap.Modal.getInstance(addLoanModal).hide();
+        bootstrap.Modal.getInstance(document.getElementById('addLoanModal')).hide();
         e.target.reset();
         document.getElementById('loanPreview').classList.add('d-none');
+        document.getElementById('previewError').classList.add('d-none');
         loadLoans();
     } else {
         alert(data.error || "Failed to add loan");
     }
 });
 
-// UPDATE LOAN FORM SUBMISSION
 document.getElementById("edit-loan-form").addEventListener("submit", async e => {
     e.preventDefault();
     const id = document.getElementById('editLoanId').value;
@@ -412,7 +428,6 @@ document.getElementById("edit-loan-form").addEventListener("submit", async e => 
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({ due_date, status })
         });
-
         const data = await res.json();
         if (res.ok) {
             alert('✅ ' + (data.message || 'Loan updated'));
@@ -427,19 +442,15 @@ document.getElementById("edit-loan-form").addEventListener("submit", async e => 
     }
 });
 
-// DELETE LOAN HANDLER
 document.getElementById('deleteLoanBtn').addEventListener('click', async function() {
     const loanId = document.getElementById('editLoanId').value;
-    
+
     if (!confirm('⚠️ Are you sure you want to delete this loan?\n\nThis will fail if there are existing repayments or penalties.\n\nDelete those first, or mark the loan as "Cleared" to preserve history.')) {
         return;
     }
 
     try {
-        const res = await fetch(`${API}/${loanId}`, {
-            method: 'DELETE'
-        });
-
+        const res = await fetch(`${API}/${loanId}`, { method: 'DELETE' });
         const data = await res.json();
 
         if (res.ok) {
@@ -456,7 +467,6 @@ document.getElementById('deleteLoanBtn').addEventListener('click', async functio
 });
 
 document.addEventListener("DOMContentLoaded", async () => {
-    await loadSettings();
     await loadMembers();
     loadLoans();
 });

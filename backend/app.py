@@ -444,7 +444,7 @@ def auto_freeze_settled_month_penalties(db, loan_id, group_id):
             WHERE loan_id = %s AND group_id = %s
               AND type = 'monthly_rejesho_late'
               AND description LIKE %s
-        """, (loan_id, group_id, f"%Month {month_num}%"))
+        """, (loan_id, group_id, f"Month {month_num} rejesho%"))
         penalty_row = cursor.fetchone()
 
         if not penalty_row:
@@ -569,7 +569,7 @@ def auto_insert_loan_penalties(db, group_id):
                 WHERE loan_id = %s AND group_id = %s
                   AND type = 'monthly_rejesho_late'
                   AND description LIKE %s
-            """, (loan_id, group_id, f"%Month {month_num}%"))
+            """, (loan_id, group_id, f"Month {month_num} rejesho%"))
             exists = cursor.fetchone()
 
             # FREEZE: if penalty is frozen, do NOT touch it
