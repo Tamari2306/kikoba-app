@@ -1,294 +1,449 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-3">
-    <h1 class="fw-bold text-dark">
-        <i class="fas fa-users me-2 text-success"></i>Group Members Ledger
-    </h1>
-    <button class="btn btn-success shadow-sm" data-bs-toggle="modal" data-bs-target="#addMemberModal">
-        <i class="fas fa-user-plus me-2"></i> Add Member
-    </button>
-</div>
-
-<!-- Add Member Modal -->
-<div class="modal fade" id="addMemberModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content shadow-lg border-0">
-            <div class="modal-header bg-success text-white">
-                <h5 class="modal-title">Add New Member</h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="add-member-form">
-                    <div class="mb-3">
-                        <label class="form-label">Full Name</label>
-                        <input type="text" class="form-control" id="memberName" required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Phone (optional)</label>
-                        <input type="text" class="form-control" id="memberPhone">
-                    </div>
-                    <button class="btn btn-success w-100">
-                        <i class="fas fa-save me-1"></i> Save Member
-                    </button>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Edit Member Modal -->
-<div class="modal fade" id="editMemberModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content shadow-lg border-0">
-            <div class="modal-header bg-warning text-dark">
-                <h5 class="modal-title">Edit Member</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <form id="edit-member-form">
-                    <input type="hidden" id="editMemberId">
-                    <div class="mb-3">
-                        <label class="form-label">Full Name</label>
-                        <input type="text" class="form-control" id="editMemberName" required>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Phone (optional)</label>
-                        <input type="text" class="form-control" id="editMemberPhone">
-                    </div>
-                    <button class="btn btn-warning w-100">
-                        <i class="fas fa-save me-1"></i> Update Member
-                    </button>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Search -->
-<div class="mb-3 d-flex justify-content-end">
-    <div class="input-group" style="max-width: 320px;">
-        <span class="input-group-text bg-light"><i class="fas fa-search"></i></span>
-        <input type="text" class="form-control" id="memberSearchInput" placeholder="Search member...">
-    </div>
-</div>
-
-<!-- Members Table -->
-<div class="card shadow-sm">
-    <div class="table-responsive">
-        <table class="table table-hover align-middle mb-0">
-            <thead class="table-success">
-                <tr>
-                    <th>Member</th>
-                    <th>Phone</th>
-                    <th class="text-end">Total Contributions</th>
-                    <th class="text-end">HISA Units</th>
-                    <th class="text-end">Loans Taken</th>
-                    <th class="text-end text-danger">Loans Due</th>
-                    <th class="text-end">Penalties</th>
-                    <th class="text-center">Status</th>
-                    <th class="text-center">Actions</th>
-                </tr>
-            </thead>
-            <tbody id="membersTableBody"></tbody>
-        </table>
-    </div>
-    <div id="noMembersFound" class="alert alert-info text-center d-none m-3">
-        No members match your search.
-    </div>
-</div>
-
-<div class="alert alert-info mt-4">
-    <strong>ℹ️ Note:</strong> Total Contributions includes Hisa Anzia, Hisa, Jamii and Penalties paid. 
-    Jamii is no longer mandatory and will be returned to members at cycle end along with their Hisa contributions.
-    <br><strong>💡 Tip:</strong> <span class="badge bg-primary">Click on any member row</span> to view their detailed information, contribution history, loans, and penalties.
-</div>
-
 <style>
-    #membersTableBody tr {
-        cursor: pointer;
-        transition: background-color 0.2s ease;
+    .stat-card {
+        background: white;
+        border-radius: 10px;
+        padding: 20px;
+        margin-bottom: 15px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        border: 1px solid #e9ecef;
     }
-    #membersTableBody tr:hover {
-        background-color: #e8f5e9 !important;
+    .stat-label {
+        color: #6c757d;
+        font-size: 0.9rem;
+        margin-bottom: 5px;
+        font-weight: 500;
+    }
+    .stat-value {
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: #667eea;
+    }
+    .positive { color: #28a745 !important; }
+    .negative { color: #dc3545 !important; }
+    .card {
+        margin-bottom: 20px;
+        border: none;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    .card-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        font-weight: 600;
+    }
+    /* Rejesho history sub-table */
+    .rejesho-sub-table thead th {
+        background: #f0f4ff;
+        font-size: 0.82rem;
+        color: #495057;
+    }
+    .rejesho-sub-table td {
+        font-size: 0.85rem;
+    }
+    .rejesho-toggle-btn {
+        font-size: 0.8rem;
+        padding: 2px 10px;
     }
 </style>
 
+<div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-3">
+    <h1 class="fw-bold text-dark">
+        <i class="fas fa-user-circle me-2 text-primary"></i><span id="memberNameTitle">Member Details</span>
+    </h1>
+    <a href="/members-page" class="btn btn-outline-primary">
+        <i class="fas fa-arrow-left me-1"></i> Back to Members
+    </a>
+</div>
+
+<!-- Member Info Card -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0" id="memberName"><i class="fas fa-user"></i> Loading...</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-4">
+                <p><strong><i class="fas fa-phone me-2"></i>Phone:</strong> <span id="memberPhone">-</span></p>
+            </div>
+            <div class="col-md-4">
+                <p><strong><i class="fas fa-calendar me-2"></i>Joined:</strong> <span id="memberJoined">-</span></p>
+            </div>
+            <div class="col-md-4">
+                <p><strong><i class="fas fa-id-badge me-2"></i>Member ID:</strong> <span id="memberId">-</span></p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Financial Summary -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-chart-line me-2"></i>Financial Summary</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="stat-label">HISA Units</div>
+                    <div class="stat-value" id="hisaUnits">0</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="stat-label">Total Savings</div>
+                    <div class="stat-value" id="totalSavings">0 TZS</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="stat-label">Loan Balance</div>
+                    <div class="stat-value negative" id="loanBalance">0 TZS</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="stat-card">
+                    <div class="stat-label">Expected Profit Share</div>
+                    <div class="stat-value positive" id="profitShare">0 TZS</div>
+                </div>
+            </div>
+        </div>
+        <div class="row mt-3">
+            <div class="col-md-4">
+                <div class="stat-card">
+                    <div class="stat-label">Penalties Due</div>
+                    <div class="stat-value negative" id="penaltiesDue">0 TZS</div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="stat-card">
+                    <div class="stat-label">Net Position</div>
+                    <div class="stat-value" id="netPosition">0 TZS</div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="stat-card">
+                    <div class="stat-label">Expected Payout</div>
+                    <div class="stat-value" id="netPayout">0 TZS</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Contribution Breakdown -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-hand-holding-usd me-2"></i>Contribution Breakdown</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-3">
+                <p><strong>Hisa Anzia:</strong> <span id="hisaAnzia" class="text-success">0 TZS</span></p>
+            </div>
+            <div class="col-md-3">
+                <p><strong>Hisa:</strong> <span id="hisa" class="text-success">0 TZS</span></p>
+            </div>
+            <div class="col-md-3">
+                <p><strong>Jamii:</strong> <span id="jamii" class="text-success">0 TZS</span></p>
+            </div>
+            <div class="col-md-3">
+                <p><strong>Total:</strong> <span id="totalContributions" class="text-primary fw-bold">0 TZS</span></p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Contribution History -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-history me-2"></i>Contribution History</h5>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover align-middle">
+                <thead class="table-dark">
+                    <tr>
+                        <th>Date</th>
+                        <th>Type</th>
+                        <th class="text-end">Amount</th>
+                        <th>Transaction Date</th>
+                    </tr>
+                </thead>
+                <tbody id="contributionHistoryTable">
+                    <tr><td colspan="4" class="text-center">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================
+     FIX 3: Loans History — each loan now has a collapsible
+     rejesho history sub-table showing every payment + totals.
+     ============================================================ -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-money-bill-wave me-2"></i>Loans History</h5>
+    </div>
+    <div class="card-body p-0">
+        <div id="loansContainer">
+            <div class="text-center p-4">Loading...</div>
+        </div>
+    </div>
+</div>
+
+<!-- Penalties History -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-exclamation-triangle me-2"></i>Penalties History</h5>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-striped table-hover align-middle">
+                <thead class="table-dark">
+                    <tr>
+                        <th>Date</th>
+                        <th>Type</th>
+                        <th class="text-end">Amount</th>
+                        <th class="text-end">Paid</th>
+                        <th class="text-end">Remaining</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody id="penaltiesTable">
+                    <tr><td colspan="6" class="text-center">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
 <script>
-const API = "/api/members";
-let allMembers = [];
+    const memberId = "{{ member_id }}";
 
-function money(val) {
-    return `<strong>${(val || 0).toLocaleString()} TZS</strong>`;
-}
-
-function renderMembers(list) {
-    const body = document.getElementById("membersTableBody");
-    const empty = document.getElementById("noMembersFound");
-    body.innerHTML = "";
-
-    if (!list.length) {
-        empty.classList.remove("d-none");
-        return;
-    }
-    empty.classList.add("d-none");
-
-    list.forEach(m => {
-        const hasDebt = m.total_outstanding > 0 || m.total_penalties > 0;
-        const status = hasDebt
-            ? `<span class="badge bg-danger">Outstanding</span>`
-            : `<span class="badge bg-success">Cleared</span>`;
-
-        const tr = document.createElement('tr');
-        tr.dataset.memberId = m.id;
-        
-        tr.innerHTML = `
-            <td class="fw-bold">${m.name}</td>
-            <td>${m.phone || "—"}</td>
-            <td class="text-end">${money(m.total_contributions)}</td>
-            <td class="text-end">${m.hisa_units.toFixed(2)} units</td>
-            <td class="text-end">${money(m.total_loans_committed)}</td>
-            <td class="text-end text-danger">${money(m.total_outstanding)}</td>
-            <td class="text-end">${money(m.total_penalties)}</td>
-            <td class="text-center">${status}</td>
-            <td class="text-center action-buttons">
-                <button class="btn btn-sm btn-outline-warning edit-btn" data-id="${m.id}" data-name="${m.name}" data-phone="${m.phone || ''}">
-                    <i class="fas fa-edit"></i>
-                </button>
-                <button class="btn btn-sm btn-outline-danger delete-btn" data-id="${m.id}" data-name="${m.name}">
-                    <i class="fas fa-trash"></i>
-                </button>
-            </td>
-        `;
-
-        // Make entire row clickable (except action buttons)
-        tr.addEventListener('click', function(event) {
-            // Check if click was on action buttons or their children
-            if (!event.target.closest('.action-buttons')) {
-                window.location.href = '/member-details/' + m.id;
-            }
-        });
-
-        body.appendChild(tr);
-    });
-
-    // Attach event listeners to buttons
-    document.querySelectorAll('.edit-btn').forEach(btn => {
-        btn.addEventListener('click', function(e) {
-            e.stopPropagation(); // Prevent row click
-            handleEdit(e);
-        });
-    });
-    
-    document.querySelectorAll('.delete-btn').forEach(btn => {
-        btn.addEventListener('click', function(e) {
-            e.stopPropagation(); // Prevent row click
-            handleDelete(e);
-        });
-    });
-}
-
-function handleEdit(e) {
-    const btn = e.currentTarget;
-    const id = btn.dataset.id;
-    const name = btn.dataset.name;
-    const phone = btn.dataset.phone;
-
-    document.getElementById('editMemberId').value = id;
-    document.getElementById('editMemberName').value = name;
-    document.getElementById('editMemberPhone').value = phone;
-
-    new bootstrap.Modal(document.getElementById('editMemberModal')).show();
-}
-
-async function handleDelete(e) {
-    const btn = e.currentTarget;
-    const id = btn.dataset.id;
-    const name = btn.dataset.name;
-
-    if (!confirm(`Delete member "${name}"?\n\nThis will only work if they have no contributions, loans, or penalties.`)) {
-        return;
+    function fmt(amount) {
+        return new Intl.NumberFormat('en-TZ', {
+            style: 'decimal',
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 0
+        }).format(amount || 0) + ' TZS';
     }
 
-    try {
-        const res = await fetch(`${API}/${id}`, { method: 'DELETE' });
-        const data = await res.json();
+    function buildRejeshoTable(loan) {
+        const history = loan.rejesho_history || [];
+        const collapseId = `rejesho-collapse-${loan.id}`;
 
-        if (res.ok) {
-            alert(data.message || 'Member deleted');
-            loadMembers();
+        // Build the rows for each payment
+        let rows = '';
+        if (history.length === 0) {
+            rows = `<tr><td colspan="3" class="text-center text-muted fst-italic">No payments recorded yet</td></tr>`;
         } else {
-            alert(data.error || 'Failed to delete member');
+            history.forEach((r, i) => {
+                rows += `
+                    <tr>
+                        <td class="text-muted">${i + 1}</td>
+                        <td>${r.date}</td>
+                        <td class="text-end fw-bold text-success">${fmt(r.amount)}</td>
+                    </tr>`;
+            });
         }
-    } catch (error) {
-        alert('Network error occurred');
-        console.error(error);
+
+        // Monthly rejesho reference row
+        const monthlyRef = loan.monthly_rejesho
+            ? `<small class="text-muted ms-2">(expected ${fmt(loan.monthly_rejesho)}/month)</small>`
+            : '';
+
+        return `
+            <div class="mt-2 ms-1">
+                <button class="btn btn-sm btn-outline-secondary rejesho-toggle-btn"
+                        type="button"
+                        data-bs-toggle="collapse"
+                        data-bs-target="#${collapseId}"
+                        aria-expanded="false">
+                    <i class="fas fa-list-ul me-1"></i>
+                    Rejesho History
+                    <span class="badge bg-secondary ms-1">${history.length}</span>
+                </button>
+                ${monthlyRef}
+                <div class="collapse mt-2" id="${collapseId}">
+                    <div class="table-responsive">
+                        <table class="table table-sm table-bordered rejesho-sub-table mb-0">
+                            <thead>
+                                <tr>
+                                    <th style="width:40px">#</th>
+                                    <th>Payment Date</th>
+                                    <th class="text-end">Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                            <tfoot class="table-light fw-bold">
+                                <tr>
+                                    <td colspan="2" class="text-end">Total Paid:</td>
+                                    <td class="text-end text-success">${fmt(loan.repaid)}</td>
+                                </tr>
+                                <tr>
+                                    <td colspan="2" class="text-end">Remaining:</td>
+                                    <td class="text-end ${loan.remaining > 0 ? 'text-danger' : 'text-success'}">
+                                        ${fmt(loan.remaining)}
+                                    </td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>`;
     }
-}
 
-async function loadMembers() {
-    const res = await fetch(API);
-    allMembers = await res.json();
-    renderMembers(allMembers);
-}
-
-document.getElementById("memberSearchInput").addEventListener("input", e => {
-    const q = e.target.value.toLowerCase();
-    renderMembers(allMembers.filter(m =>
-        m.name.toLowerCase().includes(q) ||
-        (m.phone && m.phone.includes(q))
-    ));
-});
-
-document.getElementById("add-member-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    const name = memberName.value;
-    const phone = memberPhone.value;
-
-    const res = await fetch(API, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ name, phone })
-    });
-
-    if (res.ok) {
-        bootstrap.Modal.getInstance(addMemberModal).hide();
-        e.target.reset();
-        loadMembers();
-    } else {
-        alert("Failed to add member");
-    }
-});
-
-document.getElementById("edit-member-form").addEventListener("submit", async e => {
-    e.preventDefault();
-    const id = document.getElementById('editMemberId').value;
-    const name = document.getElementById('editMemberName').value;
-    const phone = document.getElementById('editMemberPhone').value;
-
-    try {
-        const res = await fetch(`${API}/${id}`, {
-            method: "PUT",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({ name, phone })
-        });
-
-        const data = await res.json();
-
-        if (res.ok) {
-            alert(data.message || 'Member updated');
-            bootstrap.Modal.getInstance(document.getElementById('editMemberModal')).hide();
-            loadMembers();
-        } else {
-            alert(data.error || 'Failed to update member');
+    function buildLoansSection(loans) {
+        if (loans.length === 0) {
+            return `<div class="p-4 text-center text-muted fst-italic">No loans taken</div>`;
         }
-    } catch (error) {
-        alert('Network error occurred');
-        console.error(error);
-    }
-});
 
-document.addEventListener("DOMContentLoaded", loadMembers);
+        const rows = loans.map(l => {
+            const statusClass = {
+                'Active':  'bg-warning text-dark',
+                'Overdue': 'bg-danger',
+                'Cleared': 'bg-success',
+                'Forgiven':'bg-info'
+            }[l.status] || 'bg-secondary';
+
+            return `
+                <tr>
+                    <td>${l.start_date}</td>
+                    <td class="text-end">${fmt(l.principal)}</td>
+                    <td class="text-end text-danger">${fmt(l.interest)}</td>
+                    <td class="text-end text-success">${fmt(l.net_amount)}</td>
+                    <td class="text-center">${l.months} mo.</td>
+                    <td class="text-end text-info fw-bold">${fmt(l.monthly_rejesho)}</td>
+                    <td class="text-end text-success">${fmt(l.repaid)}</td>
+                    <td class="text-end ${l.remaining > 0 ? 'text-danger fw-bold' : 'text-success'}">${fmt(l.remaining)}</td>
+                    <td>${l.due_date}</td>
+                    <td><span class="badge ${statusClass}">${l.status}</span></td>
+                    <td>
+                        ${buildRejeshoTable(l)}
+                    </td>
+                </tr>`;
+        }).join('');
+
+        return `
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Start Date</th>
+                            <th class="text-end">Principal</th>
+                            <th class="text-end">Interest</th>
+                            <th class="text-end">Net Received</th>
+                            <th class="text-center">Months</th>
+                            <th class="text-end">Monthly Rejesho</th>
+                            <th class="text-end">Repaid</th>
+                            <th class="text-end">Remaining</th>
+                            <th>Due Date</th>
+                            <th>Status</th>
+                            <th>Rejesho Breakdown</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>`;
+    }
+
+    function loadMemberDetails() {
+        fetch('/api/members/' + memberId + '/details')
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert(data.error);
+                    window.location.href = '/members-page';
+                    return;
+                }
+
+                // ── Member Info ────────────────────────────────────────
+                document.getElementById('memberName').innerHTML =
+                    '<i class="fas fa-user"></i> ' + data.member.name;
+                document.getElementById('memberNameTitle').textContent =
+                    data.member.name + ' — Details';
+                document.getElementById('memberPhone').textContent  = data.member.phone || '-';
+                document.getElementById('memberJoined').textContent = data.member.joined_date || '-';
+                document.getElementById('memberId').textContent     = data.member.id;
+
+                // ── Financial Summary ──────────────────────────────────
+                const s = data.summary;
+                document.getElementById('hisaUnits').textContent    = s.hisa_units.toFixed(2);
+                document.getElementById('totalSavings').textContent  = fmt(s.total_savings);
+                document.getElementById('loanBalance').textContent   = fmt(s.remaining_loans);
+                document.getElementById('profitShare').textContent   = fmt(s.expected_profit_share);
+                document.getElementById('penaltiesDue').textContent  = fmt(s.total_penalties);
+                document.getElementById('netPosition').textContent   = fmt(s.net_contribution_position);
+                document.getElementById('netPayout').textContent     = fmt(s.net_payout);
+
+                const netPosEl = document.getElementById('netPosition');
+                netPosEl.className = 'stat-value ' + (s.net_contribution_position >= 0 ? 'positive' : 'negative');
+                const netPayEl = document.getElementById('netPayout');
+                netPayEl.className = 'stat-value ' + (s.net_payout >= 0 ? 'positive' : 'negative');
+
+                // ── Contribution Breakdown ─────────────────────────────
+                const c = s.contributions;
+                document.getElementById('hisaAnzia').textContent        = fmt(c['hisa anzia'] || 0);
+                document.getElementById('hisa').textContent             = fmt(c.hisa || 0);
+                document.getElementById('jamii').textContent            = fmt(c.jamii || 0);
+                document.getElementById('totalContributions').textContent = fmt(s.total_contributions);
+
+                // ── Contribution History ───────────────────────────────
+                const histTbody = document.getElementById('contributionHistoryTable');
+                if (data.contribution_history.length === 0) {
+                    histTbody.innerHTML =
+                        '<tr><td colspan="4" class="text-center text-muted fst-italic">No contributions yet</td></tr>';
+                } else {
+                    histTbody.innerHTML = data.contribution_history.map(c => `
+                        <tr>
+                            <td>${c.date}</td>
+                            <td><span class="badge bg-primary">${c.type}</span></td>
+                            <td class="text-end fw-bold">${fmt(c.amount)}</td>
+                            <td>${c.transaction_date || c.date}</td>
+                        </tr>`).join('');
+                }
+
+                // ── Loans + Rejesho History (FIX 3) ───────────────────
+                document.getElementById('loansContainer').innerHTML =
+                    buildLoansSection(data.loans);
+
+                // ── Penalties ─────────────────────────────────────────
+                const penTbody = document.getElementById('penaltiesTable');
+                if (data.penalties.length === 0) {
+                    penTbody.innerHTML =
+                        '<tr><td colspan="6" class="text-center text-muted fst-italic">No penalties</td></tr>';
+                } else {
+                    penTbody.innerHTML = data.penalties.map(p => {
+                        const isAuto = p.type === 'monthly_rejesho_late';
+                        return `
+                            <tr>
+                                <td>${p.date}</td>
+                                <td>
+                                    <span class="badge ${isAuto ? 'bg-danger' : 'bg-warning text-dark'}">
+                                        ${isAuto ? 'Auto Loan Late' : 'Manual'}
+                                    </span>
+                                </td>
+                                <td class="text-end">${fmt(p.amount)}</td>
+                                <td class="text-end text-success">${fmt(p.amount_paid)}</td>
+                                <td class="text-end ${p.remaining > 0 ? 'text-danger fw-bold' : 'text-success'}">
+                                    ${fmt(p.remaining)}
+                                </td>
+                                <td><small>${p.description || '-'}</small></td>
+                            </tr>`;
+                    }).join('');
+                }
+            })
+            .catch(err => {
+                console.error('Error:', err);
+                alert('Failed to load member details. Please try again.');
+                window.location.href = '/members-page';
+            });
+    }
+
+    document.addEventListener('DOMContentLoaded', loadMemberDetails);
 </script>
 
 {% endblock %}
