@@ -1,3 +1,4 @@
+#kikoba-app/backend/app.py
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -391,86 +392,64 @@ def update_loan_status(db, loan_id, group_id):
     cursor.close()
 
 
-# ==================== FIX P1: AUTO-FREEZE SETTLED MONTH PENALTIES ====================
 def auto_freeze_settled_month_penalties(db, loan_id, group_id):
     """
-    FIX P1: After any rejesho payment or deletion, walk through each monthly
-    instalment slot oldest-first. If cumulative rejesho paid covers that
-    month's full expected amount, freeze that month's penalty so it stops
-    accruing. If a later reversal (deletion) uncovers a month, unfreeze it.
-
-    "Covers" means: total paid by *any* date >= month_num * monthly_rejesho.
-    We use total-paid-all-time (not on-time), because the member has now
-    settled the debt regardless of when — the penalty is already recorded for
-    the late days; it just shouldn't keep growing.
+    After any rejesho payment or deletion, walk each monthly instalment slot
+    oldest-first.  If cumulative payments cover that slot fully, freeze its
+    penalty so daily accrual stops.  If a later reversal uncovers the slot,
+    unfreeze it so accrual can resume.
     """
     cursor = get_cursor(db)
-
-    # Load loan details
     cursor.execute(
         "SELECT principal, months, due_date, status FROM loans WHERE id = %s AND group_id = %s",
         (loan_id, group_id)
     )
     loan = cursor.fetchone()
-    if not loan or loan['status'] == 'Forgiven':
+    if not loan or loan["status"] == "Forgiven":
         cursor.close()
         return
 
-    principal = float(loan['principal'])
-    months = int(loan['months'])
-    if months <= 0:
-        cursor.close()
-        return
-
-    monthly_rejesho = principal / months
+    months = int(loan["months"])
+    monthly_rejesho = float(loan["principal"]) / months if months else 0
     TOLERANCE = 1.0
 
-    # Total ever paid on this loan
     cursor.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM rejesho WHERE loan_id = %s AND group_id = %s",
+        "SELECT COALESCE(SUM(amount), 0) FROM rejesho WHERE loan_id = %s AND group_id = %s",
         (loan_id, group_id)
     )
-    row = cursor.fetchone()
-    total_paid = float(row['total']) if row else 0.0
+    total_paid = float(get_single_value(cursor, 0))
 
-    # Walk months oldest-first and freeze/unfreeze
     for month_num in range(1, months + 1):
         expected_cumulative = monthly_rejesho * month_num
 
-        # Fetch this month's penalty record (if any)
         cursor.execute("""
-            SELECT id, is_frozen
+            SELECT id, COALESCE(is_frozen, 0) AS is_frozen
             FROM penalties
             WHERE loan_id = %s AND group_id = %s
               AND type = 'monthly_rejesho_late'
               AND description LIKE %s
         """, (loan_id, group_id, f"Month {month_num} rejesho%"))
-        penalty_row = cursor.fetchone()
+        row = cursor.fetchone()
 
-        if not penalty_row:
-            # No penalty exists for this month — nothing to freeze
+        if not row:
             continue
 
-        penalty_id = penalty_row['id']
-        currently_frozen = bool(penalty_row['is_frozen'])
+        penalty_id = row["id"]
+        currently_frozen = bool(row["is_frozen"])
+        slot_paid = total_paid >= (expected_cumulative - TOLERANCE)
 
-        # Determine if this month's cumulative slot is fully paid
-        slot_fully_paid = total_paid >= (expected_cumulative - TOLERANCE)
-
-        if slot_fully_paid and not currently_frozen:
-            # Freeze: member has caught up on this month — stop accrual
+        if slot_paid and not currently_frozen:
             cursor.execute("""
                 UPDATE penalties
                 SET is_frozen = 1,
                     freeze_reason = %s
                 WHERE id = %s
             """, (
-                f"Auto-frozen: Month {month_num} fully paid (total paid {total_paid:,.0f} TZS)",
+                f"Auto-frozen: Month {month_num} fully paid (total {total_paid:,.0f} TZS)",
                 penalty_id
             ))
-
-        elif not slot_fully_paid and currently_frozen:
-            # Unfreeze: a rejesho was deleted and this month is no longer covered
+        elif not slot_paid and currently_frozen:
+            # Rejesho was deleted — unfreeze so it can accrue again
             cursor.execute("""
                 UPDATE penalties
                 SET is_frozen = 0,
@@ -482,11 +461,11 @@ def auto_freeze_settled_month_penalties(db, loan_id, group_id):
     cursor.close()
 
 
+
 def auto_insert_loan_penalties(db, group_id):
     """
-    Finds overdue MONTHLY REJESHO payments and charges daily_penalty/day per late payment.
+    NEW PENALTY SYSTEM: Finds overdue MONTHLY REJESHO payments and charges 1000/day per late payment.
     Penalties start the day AFTER the due date (same day next month).
-    Frozen penalties are never touched.
     """
 
     settings = get_group_settings(db, group_id)
@@ -550,21 +529,20 @@ def auto_insert_loan_penalties(db, group_id):
             expected_by_this_month = monthly_rejesho * month_num
             expected_prev_months   = monthly_rejesho * (month_num - 1)
 
-            # Amount specifically for THIS month paid ON TIME (before deadline)
+            # Amount specifically for THIS month paid on time / late
             this_month_paid_on_time = max(0.0, total_paid_by_due - expected_prev_months)
             percent_on_time = min(1.0, this_month_paid_on_time / monthly_rejesho) if monthly_rejesho > 0 else 1.0
 
-            # Amount paid AFTER the deadline (for this month's slot)
-            cumulative_this_month = max(0.0, total_paid_all_time - expected_prev_months)
-            this_month_paid_late = max(0.0, cumulative_this_month - this_month_paid_on_time)
-            paid_in_full_eventually = cumulative_this_month >= monthly_rejesho - TOLERANCE
+            # Total paid that is attributable to this month (cumulative, including late)
+            this_month_total_paid = max(0.0, min(total_paid_all_time, expected_by_this_month) - expected_prev_months)
+            month_fully_paid = this_month_total_paid >= monthly_rejesho - TOLERANCE
 
-            MERCY_THRESHOLD = 0.90
-            HALF_RATE_THRESHOLD = 0.75
+            MERCY_THRESHOLD = 0.90  # >= 90% paid on time → auto-forgiven
 
-            # Look up existing penalty record for this month
+            # ── Look up existing penalty record for this month ──
             cursor.execute("""
-                SELECT id, amount, COALESCE(is_frozen, 0) AS is_frozen
+                SELECT id, amount, COALESCE(amount_paid, 0) AS amount_paid,
+                       COALESCE(is_frozen, 0) AS is_frozen
                 FROM penalties
                 WHERE loan_id = %s AND group_id = %s
                   AND type = 'monthly_rejesho_late'
@@ -572,51 +550,74 @@ def auto_insert_loan_penalties(db, group_id):
             """, (loan_id, group_id, f"Month {month_num} rejesho%"))
             exists = cursor.fetchone()
 
-            # FREEZE: if penalty is frozen, do NOT touch it
-            if exists and exists['is_frozen']:
-                continue
-
             days_late = (today - month_due_date).days
             if days_late <= 0:
                 continue
 
-            # CASE 1: Paid in full ON TIME — no penalty ever
+            # If this penalty is frozen (fully paid), never touch it
+            if exists and exists["is_frozen"]:
+                continue
+
+            # ── CASE 1: Paid in full AND on time — no penalty ──
             if total_paid_by_due >= expected_by_this_month - TOLERANCE:
-                if exists and exists['amount'] == 0:
+                # Clean on-time full payment — remove any accidental zero record
+                if exists and exists['amount'] == 0 and exists['amount_paid'] == 0:
                     cursor.execute("DELETE FROM penalties WHERE id = %s", (exists['id'],))
                 continue
 
-            # CASE 2: ≥90% paid ON TIME — mercy, no penalty starts
+            # ── CASE 2: ≥90% paid on time — mercy, no penalty ──
             if percent_on_time >= MERCY_THRESHOLD:
-                if not exists:
-                    continue
+                # Remove any stale record (shouldn't normally exist)
+                if exists and exists['amount_paid'] == 0:
+                    cursor.execute("DELETE FROM penalties WHERE id = %s", (exists['id'],))
                 continue
 
-            # CASE 3: Penalty applies. Determine the daily rate from ON-TIME %
-            if percent_on_time >= HALF_RATE_THRESHOLD:
-                effective_daily = daily_penalty / 2.0
-                rate_note = f" (half-rate {int(daily_penalty/2):,}/day, ≥75% paid on time)"
-            else:
-                effective_daily = daily_penalty
-                rate_note = ""
+            # ── CASE 3: Month fully paid but LATE — freeze penalty at current amount ──
+            # Once the member has paid the full monthly rejesho (even late),
+            # stop accruing new penalty days. The penalty is already recorded;
+            # we just don't update it upward anymore.
+            if month_fully_paid:
+                if exists:
+                    # Already recorded — leave it exactly as-is (frozen by full payment)
+                    pass
+                else:
+                    # Month was paid in full late but no penalty record yet.
+                    # Calculate penalty up to TODAY only (won't grow after this).
+                    if percent_on_time > 0:
+                        mercy_factor = 1.0 - (percent_on_time / MERCY_THRESHOLD)
+                        penalty_amount = round(days_late * daily_penalty * mercy_factor)
+                    else:
+                        # Find the date it was fully paid to calculate exact days late
+                        # (approximation: use today since it was just paid)
+                        penalty_amount = round(days_late * daily_penalty)
+                    if penalty_amount > 0:
+                        desc = f"Month {month_num} rejesho paid late by {days_late} days (penalty fixed)"
+                        cursor.execute("""
+                            INSERT INTO penalties (
+                                group_id, member_id, loan_id, type, amount, description, date
+                            ) VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s)
+                        """, (group_id, member_id, loan_id, penalty_amount, desc,
+                              today.strftime("%Y-%m-%d")))
+                continue
 
-            if paid_in_full_eventually:
-                accrual_days = days_late
-            else:
-                accrual_days = days_late
+            # ── CASE 4: Still unpaid / partially unpaid — calculate and accrue ──
+            base_penalty = days_late * daily_penalty
 
             if percent_on_time > 0:
+                # Pre-deadline partial: scale penalty by how far below 90% they are
                 mercy_factor = 1.0 - (percent_on_time / MERCY_THRESHOLD)
-                penalty_amount = round(accrual_days * effective_daily * mercy_factor)
+                penalty_amount = round(base_penalty * mercy_factor)
             else:
-                penalty_amount = round(accrual_days * effective_daily)
+                # Nothing paid on time — apply post-deadline mercy for any late partial payment
+                unpaid_ratio = max(0.0, (monthly_rejesho - this_month_total_paid) / monthly_rejesho)
+                penalty_amount = round(base_penalty * unpaid_ratio)
 
             if penalty_amount <= 0:
                 continue
 
-            desc = f"Month {month_num} rejesho overdue by {days_late} days{rate_note}"
-
+            desc = f"Month {month_num} rejesho overdue by {days_late} days"
             if exists:
+                # Only increase, never decrease an existing penalty
                 if penalty_amount > exists['amount']:
                     cursor.execute("""
                         UPDATE penalties SET amount = %s, description = %s, date = %s
@@ -744,9 +745,7 @@ def get_total_penalties_paid(db, group_id):
 def get_total_group_penalty_liability(db, group_id):
     cursor = get_cursor(db)
     cursor.execute("""
-        SELECT SUM(
-            GREATEST(0, amount - COALESCE(amount_paid, 0) - COALESCE(forgiven_amount, 0))
-        ) AS total_liability
+        SELECT SUM(amount - COALESCE(amount_paid, 0)) AS total_liability
         FROM penalties
         WHERE group_id = %s
     """, (group_id,))
@@ -819,7 +818,7 @@ def signup():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     db = get_db()
-    cursor = get_cursor(db)
+    cursor = get_cursor(db)  # ← FIXED: Use get_cursor()
     error = None
 
     if request.method == "POST":
@@ -1360,7 +1359,6 @@ def get_member_details(member_id):
     )
     loans = cursor.fetchall()
     
-    # ── FIX P3: per-loan rejesho history ──────────────────────────────────────
     loan_details = []
     for loan in loans:
         cursor.execute(
@@ -1369,38 +1367,19 @@ def get_member_details(member_id):
         )
         repaid = get_single_value(cursor, 0)
         remaining = max(loan['principal'] - repaid, 0)
-
-        # Fetch individual rejesho rows for this loan, oldest-first
-        cursor.execute(
-            """SELECT id, amount, date
-               FROM rejesho
-               WHERE loan_id = %s AND group_id = %s
-               ORDER BY date ASC, id ASC""",
-            (loan['id'], group_id)
-        )
-        rejesho_rows = cursor.fetchall()
-
-        monthly_rejesho = round(loan['principal'] / loan['months'], 2) if loan['months'] else 0
-
+        
         loan_details.append({
             "id": loan['id'],
             "principal": loan['principal'],
             "interest": loan['interest'],
             "net_amount": loan['net_amount'],
             "months": loan['months'],
-            "monthly_rejesho": monthly_rejesho,
             "start_date": loan['start_date'],
             "due_date": loan['due_date'],
             "status": loan['status'],
             "repaid": repaid,
-            "remaining": remaining,
-            # New: full per-payment breakdown
-            "rejesho_history": [
-                {"id": r["id"], "amount": r["amount"], "date": r["date"]}
-                for r in rejesho_rows
-            ]
+            "remaining": remaining
         })
-    # ── END FIX P3 ────────────────────────────────────────────────────────────
     
     # Get penalties
     total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
@@ -1536,6 +1515,7 @@ def get_members():
         total_rejesho = rejesho_map.get(member_id, 0)
         total_penalties = penalties_map.get(member_id, 0)
         
+        # Calculate HISA units (simplified)
         hisa_units = total_contributions / unit_price if unit_price > 0 else 0
         remaining_loans = max(total_loans - total_rejesho, 0)
 
@@ -1548,7 +1528,7 @@ def get_members():
             "total_loans_committed": total_loans,
             "total_penalties": total_penalties,
             "total_outstanding": remaining_loans,
-            "jamii_paid": 0,
+            "jamii_paid": 0,  # Simplified for speed
             "jamii_expected": 0,
             "jamii_shortfall": 0
         })
@@ -1729,8 +1709,6 @@ def add_contribution():
         db.commit()
         cursor.close()
         update_loan_status(db, loan["id"], group_id)
-        # FIX P1: freeze any month penalties now fully covered
-        auto_freeze_settled_month_penalties(db, loan["id"], group_id)
     else:
         cursor.execute(
             "INSERT INTO contributions (group_id, member_id, type, amount, date, transaction_date) VALUES (%s, %s, %s, %s, %s, %s)",
@@ -1886,126 +1864,6 @@ def get_loans():
     return jsonify(result)
 
 
-# ==================== FIX P2: LOAN PREVIEW ENDPOINT ====================
-@app.route('/api/loans/preview', methods=['POST'])
-def preview_loan():
-    """
-    FIX P2: Returns a dry-run calculation of what a new loan would look like
-    given a principal amount, applying the same tier + cycle-cap logic as
-    add_loan, WITHOUT inserting anything.  The frontend calls this on each
-    principal change so the user always sees the correct months / due_date
-    before they submit.
-
-    Response includes:
-      start_date      – today's date (loan will start when submitted)
-      months          – capped by min(tier_months, months_remaining_in_cycle)
-      original_months – tier months before cycle cap (if capped, for display)
-      due_date        – start_date + months
-      principal, interest, net_amount, total, monthly_rejesho
-      warning         – human-readable note if months were capped
-      cycle_end_date  – so the UI can show "cycle ends on …"
-    """
-    db = get_db()
-    group_id = get_current_group_id()
-
-    if not group_id:
-        return jsonify({"error": "No group selected"}), 400
-
-    data = request.get_json()
-    try:
-        principal = float(data.get("principal", 0))
-    except (TypeError, ValueError):
-        return jsonify({"error": "Invalid principal amount"}), 400
-
-    if principal <= 0:
-        return jsonify({"error": "Principal must be positive"}), 400
-
-    settings = get_group_settings(db, group_id)
-    interest_rate = float(settings.get("interest_rate", 0.10))
-    cycle_end_date = settings.get('cycle_end_date', '')
-
-    rules = [
-        (float(settings.get("loan_tier1_amount", 500000)),
-         int(settings.get("loan_tier1_months", 1))),
-        (float(settings.get("loan_tier2_amount", 1000000)),
-         int(settings.get("loan_tier2_months", 3))),
-        (float(settings.get("loan_tier3_amount", 2000000)),
-         int(settings.get("loan_tier3_months", 6))),
-        (float(settings.get("loan_tier4_amount", 5000000)),
-         int(settings.get("loan_tier4_months", 9))),
-        (float(settings.get("loan_tier5_amount", 10000000)),
-         int(settings.get("loan_tier5_months", 12))),
-    ]
-
-    months = None
-    for max_amount, duration in rules:
-        if principal <= max_amount:
-            months = duration
-            break
-
-    if months is None:
-        return jsonify({
-            "error": "Loan amount exceeds the maximum allowed by group rules"
-        }), 400
-
-    warning_message = None
-    original_months = months
-    today = datetime.now()
-
-    if cycle_end_date:
-        try:
-            cycle_end = datetime.strptime(cycle_end_date, "%Y-%m-%d")
-            remaining_days = (cycle_end - today).days
-
-            if remaining_days <= 0:
-                return jsonify({
-                    "error": "Cannot issue loans — cycle has ended. Please start a new cycle."
-                }), 400
-
-            max_months_available = remaining_days // 30
-
-            if months > max_months_available:
-                months = max(1, max_months_available)
-                warning_message = (
-                    f"⚠️ Duration adjusted from {original_months} to {months} month(s) "
-                    f"to fit within cycle end date ({cycle_end_date})"
-                )
-        except ValueError:
-            pass
-
-    interest = round(principal * interest_rate)
-    total = principal + interest
-    net_amount = principal - interest
-
-    start_date = today
-
-    due_year = start_date.year + (start_date.month + months - 1) // 12
-    due_month = (start_date.month + months - 1) % 12 + 1
-    due_day = start_date.day
-    max_day_in_due_month = calendar.monthrange(due_year, due_month)[1]
-    if due_day > max_day_in_due_month:
-        due_day = max_day_in_due_month
-    due_date = datetime(due_year, due_month, due_day)
-
-    response = {
-        "start_date": start_date.strftime("%Y-%m-%d"),
-        "months": months,
-        "due_date": due_date.strftime("%Y-%m-%d"),
-        "principal": principal,
-        "interest": interest,
-        "net_amount": net_amount,
-        "total": total,
-        "monthly_rejesho": round(principal / months, 2),
-        "cycle_end_date": cycle_end_date or None,
-    }
-    if warning_message:
-        response["warning"] = warning_message
-        response["original_months"] = original_months
-
-    return jsonify(response)
-# ==================== END FIX P2 ====================
-
-
 @app.route('/api/loans', methods=['POST'])
 def add_loan():
     db = get_db()
@@ -2093,10 +1951,14 @@ def add_loan():
 
         start_date = datetime.now()
         
+        # FIX: Calculate due date using same day next month (proper month arithmetic)
+        # Add months to the start date
         due_year = start_date.year + (start_date.month + months - 1) // 12
         due_month = (start_date.month + months - 1) % 12 + 1
         due_day = start_date.day
         
+        # Handle edge case: if start day doesn't exist in due month (e.g., Jan 31 -> Feb 31)
+        # Use the last day of that month instead
         max_day_in_due_month = calendar.monthrange(due_year, due_month)[1]
         if due_day > max_day_in_due_month:
             due_day = max_day_in_due_month
@@ -2120,8 +1982,6 @@ def add_loan():
 
         response_data = {
             "status": "success",
-            # FIX P2: always include start_date so the UI can confirm it
-            "start_date": start_date.strftime("%Y-%m-%d"),
             "months": months,
             "principal": principal,
             "interest": interest,
@@ -2511,7 +2371,6 @@ def add_rejesho():
     cursor.close()
     
     update_loan_status(db, loan_id, group_id)
-    # FIX P1: freeze penalties for any month now fully covered by this payment
     auto_freeze_settled_month_penalties(db, loan_id, group_id)
     
     return jsonify({"status": "success"})
@@ -2578,6 +2437,7 @@ def delete_rejesho(rejesho_id):
         return jsonify({"error": "No group selected"}), 400
 
     cursor = get_cursor(db)
+    # Fetch the rejesho record to confirm it belongs to this group
     cursor.execute(
         "SELECT id, loan_id FROM rejesho WHERE id = %s AND group_id = %s",
         (rejesho_id, group_id)
@@ -2597,9 +2457,9 @@ def delete_rejesho(rejesho_id):
     db.commit()
     cursor.close()
 
+    # Recalculate loan status and penalties after deletion
     update_loan_status(db, loan_id, group_id)
     auto_insert_loan_penalties(db, group_id)
-    # FIX P1: re-evaluate freezes after deletion (may need to unfreeze if payment reversed)
     auto_freeze_settled_month_penalties(db, loan_id, group_id)
 
     return jsonify({"status": "success", "message": "Rejesho deleted successfully"})
@@ -2630,9 +2490,6 @@ def get_penalties():
             p.amount,
             p.type,
             COALESCE(p.amount_paid, 0) AS amount_paid,
-            COALESCE(p.forgiven_amount, 0) AS forgiven_amount,
-            COALESCE(p.is_frozen, 0) AS is_frozen,
-            p.freeze_reason,
             p.description,
             p.date
         FROM penalties p
@@ -2643,7 +2500,7 @@ def get_penalties():
     ledger = cursor.fetchall()
 
     cursor.execute(
-        "SELECT SUM(GREATEST(0, amount - COALESCE(amount_paid, 0) - COALESCE(forgiven_amount, 0))) FROM penalties WHERE group_id = %s",
+        "SELECT SUM(amount - COALESCE(amount_paid, 0)) FROM penalties WHERE group_id = %s",
         (group_id,)
     )
     total_due = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
@@ -2757,104 +2614,6 @@ def record_penalty_payment(penalty_id):
         cursor.close()
         print(f"Error recording penalty payment: {e}")
         return jsonify({"error": "Database error while recording payment."}), 500
-
-
-
-@app.route('/api/penalties/<int:penalty_id>/freeze', methods=['POST'])
-def freeze_penalty(penalty_id):
-    db = get_db()
-    group_id = get_current_group_id()
-    if not group_id:
-        return jsonify({"error": "No group selected"}), 400
-
-    data = request.get_json()
-    freeze = bool(data.get("freeze", True))
-    reason = (data.get("reason") or "").strip()
-
-    if freeze and not reason:
-        return jsonify({"error": "A reason is required when freezing a penalty"}), 400
-
-    cursor = get_cursor(db)
-    try:
-        cursor.execute(
-            "SELECT id FROM penalties WHERE id = %s AND group_id = %s",
-            (penalty_id, group_id)
-        )
-        if not cursor.fetchone():
-            cursor.close()
-            return jsonify({"error": "Penalty not found"}), 404
-
-        cursor.execute(
-            """UPDATE penalties
-               SET is_frozen = %s,
-                   freeze_reason = %s
-               WHERE id = %s AND group_id = %s""",
-            (1 if freeze else 0, reason if freeze else None, penalty_id, group_id)
-        )
-        db.commit()
-        cursor.close()
-        action = "frozen" if freeze else "unfrozen"
-        return jsonify({"status": "success", "message": f"Penalty {action} successfully."})
-    except Exception as e:
-        db.rollback()
-        cursor.close()
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/penalties/<int:penalty_id>/forgive-amount', methods=['POST'])
-def forgive_penalty_amount(penalty_id):
-    db = get_db()
-    group_id = get_current_group_id()
-    if not group_id:
-        return jsonify({"error": "No group selected"}), 400
-
-    data = request.get_json()
-    try:
-        forgiven_amount = float(data.get("forgiven_amount", 0))
-    except (TypeError, ValueError):
-        return jsonify({"error": "forgiven_amount must be a number"}), 400
-
-    if forgiven_amount < 0:
-        return jsonify({"error": "forgiven_amount cannot be negative"}), 400
-
-    reason = (data.get("reason") or "").strip()
-
-    cursor = get_cursor(db)
-    try:
-        cursor.execute(
-            "SELECT id, amount, COALESCE(amount_paid, 0) AS amount_paid FROM penalties WHERE id = %s AND group_id = %s",
-            (penalty_id, group_id)
-        )
-        penalty = cursor.fetchone()
-        if not penalty:
-            cursor.close()
-            return jsonify({"error": "Penalty not found"}), 404
-
-        max_forgivable = penalty['amount'] - penalty['amount_paid']
-        if forgiven_amount > max_forgivable:
-            cursor.close()
-            return jsonify({
-                "error": f"Cannot forgive more than the remaining due ({max_forgivable:,.0f} TZS)"
-            }), 400
-
-        forgiveness_note = f" | Forgiven {forgiven_amount:,.0f} TZS" + (f": {reason}" if reason else "")
-        cursor.execute(
-            """UPDATE penalties
-               SET forgiven_amount = %s,
-                   description = COALESCE(description, '') || %s
-               WHERE id = %s AND group_id = %s""",
-            (forgiven_amount, forgiveness_note, penalty_id, group_id)
-        )
-        db.commit()
-        cursor.close()
-        return jsonify({
-            "status": "success",
-            "message": f"Forgiven {forgiven_amount:,.0f} TZS from Penalty #{penalty_id}."
-        })
-    except Exception as e:
-        db.rollback()
-        cursor.close()
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/penalties/<int:penalty_id>', methods=['PUT', 'DELETE'])
@@ -3040,6 +2799,7 @@ def calculate_profits():
     
     admin_id = get_group_admin_member_id(db, group_id)
     
+    # FIX: Use cursor instead of db.execute()
     cursor = get_cursor(db)
     cursor.execute(
         "SELECT id, name FROM members WHERE group_id = %s AND is_system = 0", 
@@ -3052,9 +2812,11 @@ def calculate_profits():
     for m in members:
         member_id = m['id']
         
+        # Get HISA units (only Hisa + Jamii count toward units)
         hisa_data = get_member_hisa_units(db, member_id, group_id)
         member_units = hisa_data['units']
         
+        # Total savings includes Hisa Anzia + Hisa + Jamii (all to be returned)
         cursor.execute(
             """
             SELECT SUM(amount) 
@@ -3067,6 +2829,7 @@ def calculate_profits():
         
         profit_share = round(member_units * profit_per_unit)
 
+        # Calculate remaining loans
         cursor.execute(
             """
             SELECT SUM(principal) 
@@ -3362,6 +3125,7 @@ def export_raw_backup():
             csv_buffer.close()
             cursor.close()
 
+        # Balance sheet generation
         cursor = get_cursor(db)
         cursor.execute(
             "SELECT id, name FROM members WHERE group_id = %s AND is_system = 0", 
