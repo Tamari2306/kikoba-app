@@ -464,82 +464,71 @@ def auto_freeze_settled_month_penalties(db, loan_id, group_id):
 
 def auto_insert_loan_penalties(db, group_id):
     """
-    NEW PENALTY SYSTEM: Finds overdue MONTHLY REJESHO payments and charges 1000/day per late payment.
-    Penalties start the day AFTER the due date (same day next month).
+    Penalty system:
+    - Charges daily_penalty TZS/day for each overdue monthly rejesho slot.
+    - >= 90% paid ON TIME before deadline: no penalty (mercy threshold).
+    - < 90% on time: penalty = days_late * daily_rate * (1 - pct_on_time/0.90).
+    - Once a month slot is FULLY PAID (even if late), penalty is FROZEN by
+      auto_freeze_settled_month_penalties and will never be touched again.
+    - Frozen penalties are skipped entirely.
     """
+    # Freeze all fully-paid months before accruing new days
+    cursor_ids = get_cursor(db)
+    cursor_ids.execute(
+        "SELECT id FROM loans WHERE group_id = %s AND status IN ('Active', 'Overdue')",
+        (group_id,)
+    )
+    for row in cursor_ids.fetchall():
+        auto_freeze_settled_month_penalties(db, row['id'], group_id)
+    cursor_ids.close()
 
     settings = get_group_settings(db, group_id)
-    daily_penalty = float(settings.get("daily_penalty_amount", 1000))
-
-    today = datetime.now().date()
+    daily_penalty   = float(settings.get("daily_penalty_amount", 1000))
+    MERCY_THRESHOLD = 0.90
+    TOLERANCE       = 1.0
+    today           = datetime.now().date()
 
     cursor = get_cursor(db)
-
     cursor.execute("""
-        SELECT l.id, l.member_id, l.principal, l.months, l.start_date, l.due_date
+        SELECT l.id, l.member_id, l.principal, l.months, l.due_date
         FROM loans l
-        WHERE l.group_id = %s 
-          AND l.status IN ('Active', 'Overdue')
+        WHERE l.group_id = %s AND l.status IN ('Active', 'Overdue')
     """, (group_id,))
     active_loans = cursor.fetchall()
 
     for loan in active_loans:
-        loan_id = loan['id']
-        member_id = loan['member_id']
-        monthly_rejesho = loan['principal'] / loan['months']
-        final_due_date = datetime.strptime(loan['due_date'], "%Y-%m-%d").date()
-        
-        base_day = final_due_date.day
-        
-        base_month = final_due_date.month - loan['months']
-        base_year = final_due_date.year
+        loan_id         = loan['id']
+        member_id       = loan['member_id']
+        months          = loan['months']
+        monthly_rejesho = loan['principal'] / months
+
+        final_due = datetime.strptime(loan['due_date'], "%Y-%m-%d").date()
+        base_day   = final_due.day
+        base_month = final_due.month - months
+        base_year  = final_due.year
         if base_month <= 0:
             base_month += 12
-            base_year -= 1
-        
-        for month_num in range(1, loan['months'] + 1):
-            due_month = base_month + month_num
-            due_year = base_year
-            if due_month > 12:
-                due_month -= 12
-                due_year += 1
-            
-            max_day_in_due_month = calendar.monthrange(due_year, due_month)[1]
-            due_day = min(base_day, max_day_in_due_month)
-            
-            month_due_date = datetime(due_year, due_month, due_day).date()
-            
+            base_year  -= 1
+
+        for month_num in range(1, months + 1):
+            dm = base_month + month_num
+            dy = base_year
+            if dm > 12:
+                dm -= 12
+                dy += 1
+
+            month_due_date = datetime(
+                dy, dm, min(base_day, calendar.monthrange(dy, dm)[1])
+            ).date()
+
             if today <= month_due_date:
                 continue
-            
-            # Paid ON OR BEFORE this month's deadline
-            cursor.execute("""
-                SELECT SUM(amount) FROM rejesho
-                WHERE loan_id = %s AND group_id = %s AND date <= %s
-            """, (loan_id, group_id, month_due_date.strftime("%Y-%m-%d")))
-            total_paid_by_due = get_single_value(cursor, 0)
 
-            # Total ever paid (including late payments) up to today
-            cursor.execute("""
-                SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s
-            """, (loan_id, group_id))
-            total_paid_all_time = get_single_value(cursor, 0)
+            days_late = (today - month_due_date).days
+            if days_late <= 0:
+                continue
 
-            TOLERANCE = 1.0
-            expected_by_this_month = monthly_rejesho * month_num
-            expected_prev_months   = monthly_rejesho * (month_num - 1)
-
-            # Amount specifically for THIS month paid on time / late
-            this_month_paid_on_time = max(0.0, total_paid_by_due - expected_prev_months)
-            percent_on_time = min(1.0, this_month_paid_on_time / monthly_rejesho) if monthly_rejesho > 0 else 1.0
-
-            # Total paid that is attributable to this month (cumulative, including late)
-            this_month_total_paid = max(0.0, min(total_paid_all_time, expected_by_this_month) - expected_prev_months)
-            month_fully_paid = this_month_total_paid >= monthly_rejesho - TOLERANCE
-
-            MERCY_THRESHOLD = 0.90  # >= 90% paid on time → auto-forgiven
-
-            # ── Look up existing penalty record for this month ──
+            # Look up existing penalty (check frozen flag)
             cursor.execute("""
                 SELECT id, amount, COALESCE(amount_paid, 0) AS amount_paid,
                        COALESCE(is_frozen, 0) AS is_frozen
@@ -550,74 +539,50 @@ def auto_insert_loan_penalties(db, group_id):
             """, (loan_id, group_id, f"Month {month_num} rejesho%"))
             exists = cursor.fetchone()
 
-            days_late = (today - month_due_date).days
-            if days_late <= 0:
+            # Frozen = fully paid — never touch
+            if exists and exists['is_frozen']:
                 continue
 
-            # If this penalty is frozen (fully paid), never touch it
-            if exists and exists["is_frozen"]:
-                continue
+            expected_prev = monthly_rejesho * (month_num - 1)
+            expected_this = monthly_rejesho * month_num
 
-            # ── CASE 1: Paid in full AND on time — no penalty ──
-            if total_paid_by_due >= expected_by_this_month - TOLERANCE:
-                # Clean on-time full payment — remove any accidental zero record
-                if exists and exists['amount'] == 0 and exists['amount_paid'] == 0:
-                    cursor.execute("DELETE FROM penalties WHERE id = %s", (exists['id'],))
-                continue
+            # Paid on or before this month's deadline
+            cursor.execute("""
+                SELECT COALESCE(SUM(amount), 0) FROM rejesho
+                WHERE loan_id = %s AND group_id = %s AND date <= %s
+            """, (loan_id, group_id, month_due_date.strftime("%Y-%m-%d")))
+            paid_by_due = float(get_single_value(cursor, 0))
 
-            # ── CASE 2: ≥90% paid on time — mercy, no penalty ──
-            if percent_on_time >= MERCY_THRESHOLD:
-                # Remove any stale record (shouldn't normally exist)
+            # Full on-time payment — no penalty; clean up any stale zero record
+            if paid_by_due >= expected_this - TOLERANCE:
                 if exists and exists['amount_paid'] == 0:
                     cursor.execute("DELETE FROM penalties WHERE id = %s", (exists['id'],))
                 continue
 
-            # ── CASE 3: Month fully paid but LATE — freeze penalty at current amount ──
-            # Once the member has paid the full monthly rejesho (even late),
-            # stop accruing new penalty days. The penalty is already recorded;
-            # we just don't update it upward anymore.
-            if month_fully_paid:
-                if exists:
-                    # Already recorded — leave it exactly as-is (frozen by full payment)
-                    pass
-                else:
-                    # Month was paid in full late but no penalty record yet.
-                    # Calculate penalty up to TODAY only (won't grow after this).
-                    if percent_on_time > 0:
-                        mercy_factor = 1.0 - (percent_on_time / MERCY_THRESHOLD)
-                        penalty_amount = round(days_late * daily_penalty * mercy_factor)
-                    else:
-                        # Find the date it was fully paid to calculate exact days late
-                        # (approximation: use today since it was just paid)
-                        penalty_amount = round(days_late * daily_penalty)
-                    if penalty_amount > 0:
-                        desc = f"Month {month_num} rejesho paid late by {days_late} days (penalty fixed)"
-                        cursor.execute("""
-                            INSERT INTO penalties (
-                                group_id, member_id, loan_id, type, amount, description, date
-                            ) VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s)
-                        """, (group_id, member_id, loan_id, penalty_amount, desc,
-                              today.strftime("%Y-%m-%d")))
+            # How much of THIS month's slot was paid on time
+            this_month_on_time = max(0.0, paid_by_due - expected_prev)
+            pct_on_time = min(1.0, this_month_on_time / monthly_rejesho) if monthly_rejesho > 0 else 0.0
+
+            # >= 90% on time → mercy, no penalty; clean up stale record
+            if pct_on_time >= MERCY_THRESHOLD:
+                if exists and exists['amount_paid'] == 0:
+                    cursor.execute("DELETE FROM penalties WHERE id = %s", (exists['id'],))
                 continue
 
-            # ── CASE 4: Still unpaid / partially unpaid — calculate and accrue ──
-            base_penalty = days_late * daily_penalty
-
-            if percent_on_time > 0:
-                # Pre-deadline partial: scale penalty by how far below 90% they are
-                mercy_factor = 1.0 - (percent_on_time / MERCY_THRESHOLD)
-                penalty_amount = round(base_penalty * mercy_factor)
+            # Calculate penalty with on-time mercy factor
+            base = days_late * daily_penalty
+            if pct_on_time > 0:
+                mercy_factor   = 1.0 - (pct_on_time / MERCY_THRESHOLD)
+                penalty_amount = round(base * mercy_factor)
             else:
-                # Nothing paid on time — apply post-deadline mercy for any late partial payment
-                unpaid_ratio = max(0.0, (monthly_rejesho - this_month_total_paid) / monthly_rejesho)
-                penalty_amount = round(base_penalty * unpaid_ratio)
+                penalty_amount = round(base)
 
             if penalty_amount <= 0:
                 continue
 
             desc = f"Month {month_num} rejesho overdue by {days_late} days"
             if exists:
-                # Only increase, never decrease an existing penalty
+                # Only ever increase, never decrease
                 if penalty_amount > exists['amount']:
                     cursor.execute("""
                         UPDATE penalties SET amount = %s, description = %s, date = %s
@@ -630,14 +595,14 @@ def auto_insert_loan_penalties(db, group_id):
                     ) VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s)
                 """, (group_id, member_id, loan_id, penalty_amount, desc,
                       today.strftime("%Y-%m-%d")))
-        
-        cursor.execute("""
-            SELECT SUM(amount) FROM rejesho WHERE loan_id = %s AND group_id = %s
-        """, (loan_id, group_id))
-        total_paid_overall = get_single_value(cursor, 0)
-        
-        remaining = loan['principal'] - total_paid_overall
-        
+
+        # Update loan status
+        cursor.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM rejesho WHERE loan_id = %s AND group_id = %s",
+            (loan_id, group_id)
+        )
+        total_paid = float(get_single_value(cursor, 0))
+        remaining  = loan['principal'] - total_paid
         if remaining <= 0:
             cursor.execute("UPDATE loans SET status = 'Cleared' WHERE id = %s", (loan_id,))
         elif today > datetime.strptime(loan['due_date'], "%Y-%m-%d").date():

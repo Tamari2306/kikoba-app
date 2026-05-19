@@ -125,6 +125,10 @@ function fc(n) {
 }
 
 function loadMemberDetails() {
+    if (!memberId || memberId === 'None' || memberId === '') {
+        window.location.href = '/members-page';
+        return;
+    }
     fetch('/api/members/' + memberId + '/details')
         .then(r => r.json())
         .then(data => {
