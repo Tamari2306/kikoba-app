@@ -1332,18 +1332,27 @@ def get_member_details(member_id):
         )
         repaid = get_single_value(cursor, 0)
         remaining = max(loan['principal'] - repaid, 0)
-        
+        monthly_rejesho = round(loan['principal'] / loan['months'], 2) if loan['months'] else 0
+
+        cursor.execute(
+            "SELECT id, amount, date FROM rejesho WHERE loan_id = %s AND group_id = %s ORDER BY date ASC, id ASC",
+            (loan['id'], group_id)
+        )
+        rejesho_rows = cursor.fetchall()
+
         loan_details.append({
             "id": loan['id'],
             "principal": loan['principal'],
             "interest": loan['interest'],
             "net_amount": loan['net_amount'],
             "months": loan['months'],
+            "monthly_rejesho": monthly_rejesho,
             "start_date": loan['start_date'],
             "due_date": loan['due_date'],
             "status": loan['status'],
             "repaid": repaid,
-            "remaining": remaining
+            "remaining": remaining,
+            "rejesho_history": [{"id": r["id"], "amount": r["amount"], "date": r["date"]} for r in rejesho_rows]
         })
     
     # Get penalties
