@@ -568,13 +568,35 @@ def auto_insert_loan_penalties(db, group_id):
                     coverage_date = pdate
                     break
 
+            MERCY_THRESHOLD = 0.90
+
+            # How much of THIS slot paid (cumulative minus previous slots)
+            cumul_all      = sum(a for a, _ in payments)
+            prev_target    = monthly_rejesho * (month_num - 1)
+            this_slot_paid = max(0.0, min(cumul_all, target) - prev_target)
+            pct_paid       = min(1.0, this_slot_paid / monthly_rejesho) if monthly_rejesho > 0 else 1.0
+
+            # How much of this slot was paid BEFORE the deadline
+            paid_by_due_slot = max(0.0, min(paid_by_due, target) - prev_target)
+            before_pct = min(1.0, paid_by_due_slot / monthly_rejesho) if monthly_rejesho > 0 else 1.0
+
+            # ── MERCY: ≥90% paid BEFORE deadline → no penalty at all ──
+            if before_pct >= MERCY_THRESHOLD:
+                if existing and existing['amount'] == 0:
+                    cursor.execute("DELETE FROM penalties WHERE id = %s", (existing['id'],))
+                continue
+
             if coverage_date is not None:
-                # Slot is now covered (late) — freeze at the late days count
+                # Covered fully (late) → freeze at days accrued when 100% was reached
                 freeze_days    = (coverage_date - month_due_date).days
                 penalty_amount = max(0, round(freeze_days * daily_penalty))
                 should_freeze  = True
+            elif pct_paid >= MERCY_THRESHOLD:
+                # ≥90% paid after deadline but not 100% yet → freeze at today's count
+                penalty_amount = round(days_late_today * daily_penalty)
+                should_freeze  = True
             else:
-                # Not yet covered — accrue up to today
+                # Below mercy threshold → keep accruing
                 penalty_amount = round(days_late_today * daily_penalty)
                 should_freeze  = False
 
