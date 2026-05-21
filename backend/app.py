@@ -586,7 +586,7 @@ def auto_insert_loan_penalties(db, group_id):
                     cursor.execute("DELETE FROM penalties WHERE id = %s", (existing['id'],))
                 continue
 
-            HALF_RATE_THRESHOLD = 0.75
+            HALF_RATE_THRESHOLD = 0.70
 
             if coverage_date is not None:
                 # Covered fully (late) → freeze at full daily rate
