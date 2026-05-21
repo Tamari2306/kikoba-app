@@ -586,17 +586,24 @@ def auto_insert_loan_penalties(db, group_id):
                     cursor.execute("DELETE FROM penalties WHERE id = %s", (existing['id'],))
                 continue
 
+            HALF_RATE_THRESHOLD = 0.75
+
             if coverage_date is not None:
-                # Covered fully (late) → freeze at days accrued when 100% was reached
+                # Covered fully (late) → freeze at full daily rate
+                # Penalty was accruing at full rate before payment, so keep it
                 freeze_days    = (coverage_date - month_due_date).days
                 penalty_amount = max(0, round(freeze_days * daily_penalty))
                 should_freeze  = True
             elif pct_paid >= MERCY_THRESHOLD:
-                # ≥90% paid after deadline but not 100% yet → freeze at today's count
+                # ≥90% paid after deadline but not 100% yet → freeze at full rate
                 penalty_amount = round(days_late_today * daily_penalty)
                 should_freeze  = True
+            elif pct_paid >= HALF_RATE_THRESHOLD:
+                # ≥75% but <90% paid → still accruing but at half rate (500/day)
+                penalty_amount = round(days_late_today * (daily_penalty / 2.0))
+                should_freeze  = False
             else:
-                # Below mercy threshold → keep accruing
+                # Below 75% → full rate accruing
                 penalty_amount = round(days_late_today * daily_penalty)
                 should_freeze  = False
 
@@ -1385,14 +1392,17 @@ def get_member_details(member_id):
         )
         repaid = get_single_value(cursor, 0)
         remaining = max(loan['principal'] - repaid, 0)
-        monthly_rejesho = round(loan['principal'] / loan['months'], 2) if loan['months'] > 0 else 0
+        monthly_rejesho = round(loan['principal'] / loan['months'], 2) if loan['months'] else 0
 
-        # Fetch individual rejesho payments for the expandable sub-rows
+        # Rejesho payment history for this loan
         cursor.execute(
-            "SELECT amount, date FROM rejesho WHERE loan_id = %s AND group_id = %s ORDER BY date ASC",
+            """SELECT amount, date FROM rejesho
+               WHERE loan_id = %s AND group_id = %s
+               ORDER BY date ASC""",
             (loan['id'], group_id)
         )
-        rejesho_history = [{"amount": r['amount'], "date": r['date']} for r in cursor.fetchall()]
+        rejesho_rows = cursor.fetchall()
+        rejesho_history = [{"amount": float(r['amount']), "date": r['date']} for r in rejesho_rows]
 
         loan_details.append({
             "id": loan['id'],
@@ -1406,7 +1416,7 @@ def get_member_details(member_id):
             "status": loan['status'],
             "repaid": repaid,
             "remaining": remaining,
-            "rejesho_history": rejesho_history   # ← this was missing
+            "rejesho_history": rejesho_history
         })
     
     # Get penalties
@@ -1890,88 +1900,6 @@ def get_loans():
 
     cursor.close()
     return jsonify(result)
-
-
-@app.route('/api/loans/preview', methods=['POST'])
-def preview_loan():
-    db = get_db()
-    group_id = get_current_group_id()
-
-    if not group_id:
-        return jsonify({"error": "No group selected"}), 400
-
-    data = request.get_json()
-    try:
-        principal = float(data.get("principal", 0))
-    except (TypeError, ValueError):
-        return jsonify({"error": "Invalid principal amount"}), 400
-
-    if principal <= 0:
-        return jsonify({"error": "Principal must be greater than zero"}), 400
-
-    settings = get_group_settings(db, group_id)
-    interest_rate = float(settings.get("interest_rate", 0.10))
-    cycle_end_date = settings.get("cycle_end_date", "")
-
-    rules = [
-        (float(settings.get("loan_tier1_amount", 500000)),   int(settings.get("loan_tier1_months", 1))),
-        (float(settings.get("loan_tier2_amount", 1500000)),  int(settings.get("loan_tier2_months", 3))),
-        (float(settings.get("loan_tier3_amount", 3000000)),  int(settings.get("loan_tier3_months", 6))),
-        (float(settings.get("loan_tier4_amount", 5000000)),  int(settings.get("loan_tier4_months", 9))),
-        (float(settings.get("loan_tier5_amount", 10000000)), int(settings.get("loan_tier5_months", 12))),
-    ]
-
-    months = None
-    for max_amount, duration in rules:
-        if principal <= max_amount:
-            months = duration
-            break
-
-    if months is None:
-        return jsonify({"error": "Loan amount exceeds the maximum allowed by group rules"}), 400
-
-    warning = None
-    original_months = months
-
-    if cycle_end_date:
-        try:
-            cycle_end = datetime.strptime(cycle_end_date, "%Y-%m-%d")
-            today = datetime.now()
-            remaining_days = (cycle_end - today).days
-
-            if remaining_days <= 0:
-                return jsonify({"error": "Cannot issue loans — cycle has ended. Please start a new cycle."}), 400
-
-            max_months_available = remaining_days // 30
-            if months > max_months_available:
-                months = max(1, max_months_available)
-                warning = (f"Loan duration adjusted from {original_months} to {months} months "
-                           f"to fit within cycle end date ({cycle_end_date})")
-        except ValueError:
-            pass
-
-    today = datetime.now()
-    interest = round(principal * interest_rate)
-    net_amount = principal - interest
-
-    due_year = today.year + (today.month + months - 1) // 12
-    due_month = (today.month + months - 1) % 12 + 1
-    due_day = today.day
-    max_day = calendar.monthrange(due_year, due_month)[1]
-    if due_day > max_day:
-        due_day = max_day
-    due_date = datetime(due_year, due_month, due_day)
-
-    return jsonify({
-        "start_date":        today.strftime("%Y-%m-%d"),
-        "principal":         principal,
-        "interest":          interest,
-        "net_amount":        net_amount,
-        "months":            months,
-        "monthly_rejesho":   round(principal / months, 2),
-        "due_date":          due_date.strftime("%Y-%m-%d"),
-        "warning":           warning
-    })
 
 
 @app.route('/api/loans', methods=['POST'])
