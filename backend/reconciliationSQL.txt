@@ -1,0 +1,95 @@
+-- ============================================================
+-- KIKOBA MONTHLY RECONCILIATION QUERY
+-- Run this in Supabase at end of each month.
+-- Compare "expected_balance" to M-Koba actual balance.
+-- Update the two values at the top as needed.
+-- ============================================================
+
+WITH config AS (
+    SELECT
+        1        AS group_id,
+        20000    AS opening_balance   -- TZS carried over from previous cycle
+                                      -- Update this if it changes
+),
+
+money_in AS (
+    SELECT
+        COALESCE(SUM(CASE WHEN type = 'hisa'       THEN amount END), 0) AS hisa,
+        COALESCE(SUM(CASE WHEN type = 'hisa anzia' THEN amount END), 0) AS hisa_anzia,
+        COALESCE(SUM(CASE WHEN type = 'jamii'      THEN amount END), 0) AS jamii
+    FROM contributions
+    WHERE group_id = (SELECT group_id FROM config)
+      AND type != 'jamii_deduction'
+),
+
+loans_summary AS (
+    SELECT
+        COALESCE(SUM(principal),  0) AS total_principal,
+        COALESCE(SUM(interest),   0) AS total_interest,
+        COALESCE(SUM(net_amount), 0) AS total_disbursed
+    FROM loans
+    WHERE group_id = (SELECT group_id FROM config)
+),
+
+rejesho_summary AS (
+    SELECT COALESCE(SUM(r.amount), 0) AS total_rejesho
+    FROM rejesho r
+    JOIN loans l ON r.loan_id = l.id
+    WHERE l.group_id = (SELECT group_id FROM config)
+),
+
+penalties_summary AS (
+    SELECT
+        COALESCE(SUM(amount),                    0) AS total_imposed,
+        COALESCE(SUM(COALESCE(amount_paid, 0)),  0) AS total_collected,
+        COALESCE(SUM(GREATEST(0,
+            amount
+            - COALESCE(amount_paid, 0)
+            - COALESCE(forgiven_amount, 0)
+        )), 0) AS total_outstanding
+    FROM penalties
+    WHERE group_id = (SELECT group_id FROM config)
+),
+
+jamii_out AS (
+    SELECT COALESCE(SUM(ABS(amount)), 0) AS total_jamii_deductions
+    FROM contributions
+    WHERE group_id = (SELECT group_id FROM config)
+      AND type = 'jamii_deduction'
+)
+
+SELECT
+    -- ── MONEY IN ──────────────────────────────────────────
+    (SELECT opening_balance       FROM config)                          AS "Opening Balance",
+    mi.hisa                                                             AS "Hisa",
+    mi.hisa_anzia                                                       AS "Hisa Anzia",
+    mi.jamii                                                            AS "Jamii",
+    rs.total_rejesho                                                    AS "Rejesho Collected",
+    ps.total_collected                                                  AS "Penalties Collected",
+    (SELECT opening_balance FROM config)
+        + mi.hisa + mi.hisa_anzia + mi.jamii
+        + rs.total_rejesho
+        + ps.total_collected                                            AS "TOTAL IN",
+
+    -- ── MONEY OUT ─────────────────────────────────────────
+    ls.total_disbursed                                                  AS "Loans Disbursed (Net)",
+    jo.total_jamii_deductions                                           AS "Jamii Expenses Paid Out",
+    ls.total_disbursed + jo.total_jamii_deductions                      AS "TOTAL OUT",
+
+    -- ── EXPECTED BALANCE ──────────────────────────────────
+    (SELECT opening_balance FROM config)
+        + mi.hisa + mi.hisa_anzia + mi.jamii
+        + rs.total_rejesho
+        + ps.total_collected
+        - ls.total_disbursed
+        - jo.total_jamii_deductions                                     AS "EXPECTED M-KOBA BALANCE",
+
+    -- ── FOR CONTEXT ───────────────────────────────────────
+    ls.total_principal                                                  AS "Total Principal Loaned",
+    ls.total_interest                                                   AS "Interest Retained",
+    ls.total_principal - rs.total_rejesho                               AS "Rejesho Still Owed",
+    ps.total_imposed                                                    AS "Penalties Imposed",
+    ps.total_outstanding                                                AS "Penalties Still Outstanding",
+    ps.total_imposed - ps.total_collected                               AS "Penalties Uncollected"
+
+FROM money_in mi, loans_summary ls, rejesho_summary rs, penalties_summary ps, jamii_out jo;
