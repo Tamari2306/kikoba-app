@@ -1620,8 +1620,21 @@ def member_login():
                 WHERE phone = %s AND group_id = %s AND is_system = 0
                 LIMIT 1
             """, (phone, gid))
+
             member = cursor.fetchone()
             cursor.close()
+
+            print(
+                "LOGIN DEBUG:",
+                {
+                    "id": member["id"] if member else None,
+                    "name": member["name"] if member else None,
+                    "group_id": member["group_id"] if member else None,
+                    "role": member["role"] if member else None,
+                    "is_password_none": member["password"] is None if member else None,
+                    "password_length": len(member["password"]) if member and member["password"] else 0,
+                }
+            )
 
             if not member:
                 error = "Member not found in that group"
