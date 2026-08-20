@@ -138,6 +138,71 @@
     </div>
 </div>
 
+<!-- Set Member Password Modal -->
+<div class="modal fade" id="setPasswordModal" tabindex="-1" aria-labelledby="setPasswordModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title" id="setPasswordModalLabel">
+                    <i class="fas fa-key me-2"></i>Set Member Access
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+
+            <div class="modal-body">
+                <input type="hidden" id="passwordMemberId">
+
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Member</label>
+                    <input type="text" class="form-control" id="passwordMemberName" readonly>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label fw-bold">New Password <span class="text-danger">*</span></label>
+                    <input type="password"
+                           class="form-control"
+                           id="memberNewPassword"
+                           minlength="6"
+                           autocomplete="new-password"
+                           placeholder="At least 6 characters">
+                    <div class="form-text">The password will be securely hashed before being stored.</div>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Confirm Password <span class="text-danger">*</span></label>
+                    <input type="password"
+                           class="form-control"
+                           id="memberConfirmPassword"
+                           minlength="6"
+                           autocomplete="new-password"
+                           placeholder="Enter the password again">
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Role</label>
+                    <select class="form-select" id="memberAccessRole">
+                        <option value="member">Member</option>
+                        <option value="treasurer">Treasurer</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                </div>
+
+                <div id="passwordError" class="alert alert-danger d-none" role="alert"></div>
+                <div id="passwordSuccess" class="alert alert-success d-none" role="alert"></div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                    Cancel
+                </button>
+                <button type="button" class="btn btn-primary" id="saveMemberPasswordBtn" onclick="saveMemberPassword()">
+                    <i class="fas fa-save me-1"></i> Save Access
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Members Table -->
 <div class="card shadow-sm">
     <div class="card-header d-flex justify-content-between align-items-center">
@@ -180,6 +245,16 @@ function fmt(amount) {
 }
 
 let allMembers = [];
+
+// Escape values before putting member data into an HTML attribute/string.
+function escapeJsString(value) {
+    return String(value ?? '')
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n');
+}
 
 async function loadMembers() {
     try {
@@ -227,18 +302,18 @@ function renderMembers(members) {
     tbody.innerHTML = members.map((m, idx) => `
         <tr class="member-row"
             onclick="goToDetails(event, ${m.id})"
-            title="Click to view ${m.name}'s details">
+            title="Click to view ${escapeHtml(m.name)}'s details">
             <td class="text-muted">${idx + 1}</td>
             <td>
                 <div class="d-flex align-items-center">
                     <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center me-2"
                          style="width:34px;height:34px;font-size:0.85rem;flex-shrink:0">
-                        ${m.name.charAt(0).toUpperCase()}
+                        ${escapeHtml((m.name || '?').charAt(0).toUpperCase())}
                     </div>
-                    <span class="fw-bold">${m.name}</span>
+                    <span class="fw-bold">${escapeHtml(m.name)}</span>
                 </div>
             </td>
-            <td class="text-muted">${m.phone || '—'}</td>
+            <td class="text-muted">${escapeHtml(m.phone || '—')}</td>
             <td class="text-end">${(m.hisa_units || 0).toFixed(2)}</td>
             <td class="text-end">${fmt(m.total_contributions)}</td>
             <td class="text-end ${m.total_outstanding > 0 ? 'text-danger fw-bold' : 'text-muted'}">
@@ -253,13 +328,31 @@ function renderMembers(members) {
                    title="View Details">
                     <i class="fas fa-eye"></i>
                 </a>
-                <button class="btn btn-sm btn-outline-warning"
-                        onclick="handleEdit(${m.id}, '${m.name.replace(/'/g,"\\'")}', '${(m.phone||'').replace(/'/g,"\\'")}')">
+
+                <button class="btn btn-sm btn-outline-warning me-1"
+                        onclick="handleEdit(${m.id}, '${escapeJsString(m.name)}', '${escapeJsString(m.phone || '')}')"
+                        title="Edit Member">
                     <i class="fas fa-edit"></i>
+                </button>
+
+                <button class="btn btn-sm btn-outline-dark"
+                        onclick="openSetPasswordModal(${m.id}, '${escapeJsString(m.name)}', '${escapeJsString(m.role || 'member')}')"
+                        title="Set Password">
+                    <i class="fas fa-key"></i>
                 </button>
             </td>
         </tr>
     `).join('');
+}
+
+// Basic HTML escaping for values rendered into the table.
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
 }
 
 function goToDetails(event, memberId) {
@@ -275,10 +368,12 @@ document.getElementById('memberSearch').addEventListener('input', function() {
         renderMembers(allMembers);
         return;
     }
+
     const filtered = allMembers.filter(m =>
-        m.name.toLowerCase().includes(q) ||
+        (m.name || '').toLowerCase().includes(q) ||
         (m.phone || '').toLowerCase().includes(q)
     );
+
     renderMembers(filtered);
 });
 
@@ -296,6 +391,7 @@ document.getElementById('add-member-form').addEventListener('submit', async func
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, phone })
         });
+
         const data = await res.json();
 
         if (res.ok) {
@@ -332,6 +428,7 @@ document.getElementById('edit-member-form').addEventListener('submit', async fun
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, phone })
         });
+
         const data = await res.json();
 
         if (res.ok) {
@@ -366,6 +463,119 @@ document.getElementById('deleteMemberBtn').addEventListener('click', async funct
         alert('Network error: ' + err.message);
     }
 });
+
+// ── Set Member Password ───────────────────────────────────────────────────
+function openSetPasswordModal(memberId, memberName, currentRole) {
+    document.getElementById('passwordMemberId').value = memberId;
+    document.getElementById('passwordMemberName').value = memberName;
+    document.getElementById('memberNewPassword').value = '';
+    document.getElementById('memberConfirmPassword').value = '';
+    document.getElementById('memberAccessRole').value =
+        ['member', 'treasurer', 'admin'].includes(currentRole)
+            ? currentRole
+            : 'member';
+
+    document.getElementById('passwordError').textContent = '';
+    document.getElementById('passwordSuccess').textContent = '';
+    document.getElementById('passwordError').classList.add('d-none');
+    document.getElementById('passwordSuccess').classList.add('d-none');
+
+    const button = document.getElementById('saveMemberPasswordBtn');
+    button.disabled = false;
+    button.innerHTML = '<i class="fas fa-save me-1"></i> Save Access';
+
+    new bootstrap.Modal(document.getElementById('setPasswordModal')).show();
+}
+
+async function saveMemberPassword() {
+    const memberId = document.getElementById('passwordMemberId').value;
+    const password = document.getElementById('memberNewPassword').value;
+    const confirmPassword = document.getElementById('memberConfirmPassword').value;
+    const role = document.getElementById('memberAccessRole').value;
+
+    const errorBox = document.getElementById('passwordError');
+    const successBox = document.getElementById('passwordSuccess');
+    const button = document.getElementById('saveMemberPasswordBtn');
+
+    errorBox.textContent = '';
+    successBox.textContent = '';
+    errorBox.classList.add('d-none');
+    successBox.classList.add('d-none');
+
+    if (!memberId) {
+        errorBox.textContent = 'No member selected.';
+        errorBox.classList.remove('d-none');
+        return;
+    }
+
+    if (!password) {
+        errorBox.textContent = 'Please enter a password.';
+        errorBox.classList.remove('d-none');
+        return;
+    }
+
+    if (password.length < 6) {
+        errorBox.textContent = 'Password must be at least 6 characters.';
+        errorBox.classList.remove('d-none');
+        return;
+    }
+
+    if (password !== confirmPassword) {
+        errorBox.textContent = 'Passwords do not match.';
+        errorBox.classList.remove('d-none');
+        return;
+    }
+
+    if (!['member', 'treasurer', 'admin'].includes(role)) {
+        errorBox.textContent = 'Invalid role selected.';
+        errorBox.classList.remove('d-none');
+        return;
+    }
+
+    try {
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
+
+        const res = await fetch('/api/member/set-password', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                member_id: parseInt(memberId, 10),
+                password: password,
+                role: role
+            })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+            throw new Error(data.error || 'Failed to set member access.');
+        }
+
+        successBox.textContent =
+            data.message || 'Password and role updated successfully.';
+        successBox.classList.remove('d-none');
+
+        document.getElementById('memberNewPassword').value = '';
+        document.getElementById('memberConfirmPassword').value = '';
+
+        button.disabled = false;
+        button.innerHTML = '<i class="fas fa-check me-1"></i> Saved';
+
+        // Refresh the member list so any returned role/status changes are reflected.
+        await loadMembers();
+
+    } catch (err) {
+        console.error(err);
+        errorBox.textContent = err.message || 'Network error. Please try again.';
+        errorBox.classList.remove('d-none');
+
+        button.disabled = false;
+        button.innerHTML = '<i class="fas fa-save me-1"></i> Save Access';
+    }
+}
 
 // ── Init ──────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', loadMembers);
