@@ -1,41 +1,180 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
-    <title>Admin Login</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Kikoba Login</title>
+
+    <!-- Bootstrap CSS -->
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+        rel="stylesheet"
+    >
+
+    <!-- Bootstrap Icons -->
+    <link
+        rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css"
+    >
+
+    <style>
+        body {
+            min-height: 100vh;
+        }
+
+        .login-card {
+            max-width: 420px;
+            width: 100%;
+        }
+
+        .login-icon {
+            font-size: 2.8rem;
+        }
+
+        .form-control {
+            min-height: 46px;
+        }
+
+        .login-btn {
+            min-height: 46px;
+        }
+    </style>
 </head>
-<body class="bg-light d-flex align-items-center justify-content-center vh-100">
 
-<div class="card shadow-lg rounded-4 p-4" style="max-width: 420px; width: 100%;">
-    <h3 class="text-center fw-bold text-success mb-3">Kikoba Admin Login</h3>
+<body class="bg-light d-flex align-items-center justify-content-center p-3">
 
+<div class="card shadow-lg border-0 rounded-4 p-4 login-card">
+
+    <!-- Header -->
+    <div class="text-center mb-4">
+
+        <div class="mb-2">
+            <i class="bi bi-piggy-bank-fill text-success login-icon"></i>
+        </div>
+
+        <h3 class="fw-bold text-success mb-1">
+            Kikoba Login
+        </h3>
+
+        <p class="text-muted mb-0">
+            Access your savings group account
+        </p>
+
+    </div>
+
+
+    <!-- Error Message -->
     {% if error %}
-        <div class="alert alert-danger text-center">{{ error }}</div>
+        <div class="alert alert-danger text-center py-2">
+            <i class="bi bi-exclamation-circle me-1"></i>
+            {{ error }}
+        </div>
     {% endif %}
 
-    <form method="POST">
+
+    <!-- Login Form -->
+    <form method="POST" action="/login">
+
+        <!-- Group ID -->
         <div class="mb-3">
-            <label class="form-label fw-semibold">Admin Email</label>
-            <input type="email" name="email" class="form-control rounded-pill" required>
+
+            <label class="form-label fw-semibold">
+                <i class="bi bi-people-fill me-1"></i>
+                Group ID
+            </label>
+
+            <input
+                type="text"
+                name="group_code"
+                class="form-control rounded-pill"
+                placeholder="Enter your Kikoba Group ID"
+                required
+                autocomplete="organization"
+            >
+
+            <small class="text-muted">
+                Ask your Kikoba administrator for the Group ID.
+            </small>
+
         </div>
 
+
+        <!-- Phone Number -->
         <div class="mb-3">
-            <label class="form-label fw-semibold">Password</label>
-            <input type="password" name="password" class="form-control rounded-pill" required>
+
+            <label class="form-label fw-semibold">
+                <i class="bi bi-telephone-fill me-1"></i>
+                Phone Number
+            </label>
+
+            <input
+                type="text"
+                name="phone"
+                class="form-control rounded-pill"
+                placeholder="e.g. 0712345678"
+                required
+                autocomplete="tel"
+            >
+
         </div>
 
-        <button class="btn btn-success w-100 rounded-pill fw-bold mt-2">
+
+        <!-- Password -->
+        <div class="mb-4">
+
+            <label class="form-label fw-semibold">
+                <i class="bi bi-lock-fill me-1"></i>
+                Password
+            </label>
+
+            <input
+                type="password"
+                name="password"
+                class="form-control rounded-pill"
+                placeholder="Enter your password"
+                required
+                autocomplete="current-password"
+            >
+
+        </div>
+
+
+        <!-- Login Button -->
+        <button
+            type="submit"
+            class="btn btn-success w-100 rounded-pill fw-bold login-btn"
+        >
+            <i class="bi bi-box-arrow-in-right me-1"></i>
             Login
         </button>
+
     </form>
 
-    <div class="text-center mt-3">
+
+    <!-- Create Kikoba -->
+    <div class="text-center mt-4">
+
         <small class="text-muted">
-            New group? <a href="/signup" class="text-success fw-semibold">Create admin account</a>
+            Don't have a Kikoba yet?
+            <a
+                href="/signup"
+                class="text-success fw-semibold text-decoration-none"
+            >
+                Create a Kikoba
+            </a>
         </small>
+
     </div>
+
 </div>
+
+
+<!-- Bootstrap JS -->
+<script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js">
+</script>
 
 </body>
 </html>

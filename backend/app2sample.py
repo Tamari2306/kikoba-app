@@ -61,6 +61,62 @@ def get_current_group_id():
     return session.get("group_id")
 
 
+# ==================== ROLE-BASED ACCESS CONTROL ====================
+
+from functools import wraps
+
+def get_current_role():
+    """Return the role of the currently logged-in user (admin or member)."""
+    return session.get("role")
+
+def get_current_member_id():
+    """Return member_id for logged-in regular members."""
+    return session.get("member_id")
+
+def require_admin(f):
+    """Route decorator: only admin role can access."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "admin_id" not in session and session.get("role") != "admin":
+            if request.is_json or request.path.startswith("/api/"):
+                return jsonify({"error": "Admin access required"}), 403
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return decorated
+
+def require_treasurer_or_above(f):
+    """Route decorator: admin or treasurer can access."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        role = session.get("role")
+        if role not in ("admin", "treasurer"):
+            if request.is_json or request.path.startswith("/api/"):
+                return jsonify({"error": "Treasurer or admin access required"}), 403
+            return redirect("/member-login")
+        return f(*args, **kwargs)
+    return decorated
+
+def require_any_member(f):
+    """Route decorator: any logged-in user (admin, treasurer, member) can access."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        role = session.get("role")
+        if not role:
+            if request.is_json or request.path.startswith("/api/"):
+                return jsonify({"error": "Authentication required"}), 401
+            return redirect("/member-login")
+        return f(*args, **kwargs)
+    return decorated
+
+def is_admin_session():
+    """True if the current session belongs to an admin."""
+    return session.get("role") == "admin" or "admin_id" in session
+
+def is_own_member_data(member_id):
+    """True if the logged-in member is accessing their own data."""
+    return session.get("member_id") == member_id or is_admin_session()
+
+
 def get_group_admin_member_id(db, group_id):
     cursor = get_cursor(db)
     cursor.execute(
@@ -877,6 +933,7 @@ def login():
 
 
 @app.route('/api/groups', methods=['POST'])
+@require_admin
 def create_group_api():
     db = get_db()
     data = request.get_json()
@@ -1303,6 +1360,225 @@ def record_jamii_deduction():
     })
 
 
+
+# ==================== MEMBER AUTH ROUTES ====================
+
+@app.route('/member-login', methods=['GET', 'POST'])
+def member_login():
+    """Login for regular members (admin, treasurer, member roles)."""
+    # Already logged in as system admin → go to dashboard
+    if "admin_id" in session:
+        return redirect("/dashboard")
+    # Already logged in as member → go to portal
+    if session.get("role") in ("admin", "treasurer", "member"):
+        return redirect("/member-portal")
+
+    db = get_db()
+    error = None
+
+    if request.method == 'POST':
+        phone = (request.form.get("phone") or "").strip()
+        password = request.form.get("password") or ""
+        group_code = (request.form.get("group_code") or "").strip()
+
+        if not phone or not password:
+            error = "Phone number and password are required"
+        else:
+            cursor = get_cursor(db)
+            # Find member by phone + group_id (group_code is group_id for now)
+            try:
+                gid = int(group_code)
+            except (ValueError, TypeError):
+                cursor.close()
+                return render_template("member_login.html", error="Invalid group code")
+
+            cursor.execute("""
+                SELECT id, name, password, role, is_active, group_id
+                FROM members
+                WHERE phone = %s AND group_id = %s AND is_system = 0
+                LIMIT 1
+            """, (phone, gid))
+            member = cursor.fetchone()
+            cursor.close()
+
+            if not member:
+                error = "Member not found in that group"
+            elif not member["password"]:
+                error = "Your account has no password set. Ask your admin to set one."
+            elif not member["is_active"]:
+                error = "Your account has been deactivated. Contact your admin."
+            elif not check_password_hash(member["password"], password):
+                error = "Incorrect password"
+            else:
+                session.clear()
+                session["member_id"] = member["id"]
+                session["group_id"] = member["group_id"]
+                session["role"] = member["role"]
+                session["member_name"] = member["name"]
+                return redirect("/member-portal")
+
+    return render_template("member_login.html", error=error)
+
+
+@app.route('/member-portal')
+@require_any_member
+def member_portal():
+    """Member self-service portal — read-only view of own data."""
+    # Admins using the main dashboard don't need this
+    if "admin_id" in session and session.get("role") == "admin":
+        return redirect("/dashboard")
+    member_id = session.get("member_id")
+    if not member_id:
+        return redirect("/member-login")
+    return render_template("member_portal.html",
+                           member_id=member_id,
+                           member_name=session.get("member_name", ""))
+
+
+@app.route('/api/member/me', methods=['GET'])
+@require_any_member
+def get_my_details():
+    """API: member fetches their own details — same as get_member_details but
+    enforces that non-admins can only see their own data."""
+    member_id = session.get("member_id")
+    role = session.get("role")
+
+    # Admins/treasurers can pass ?member_id=X to see anyone in their group
+    if role in ("admin", "treasurer"):
+        requested_id = request.args.get("member_id", member_id)
+        try:
+            member_id = int(requested_id)
+        except (TypeError, ValueError):
+            member_id = session.get("member_id")
+    # Regular members only see themselves
+    else:
+        member_id = session.get("member_id")
+
+    if not member_id:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    # Reuse the existing get_member_details logic
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group found"}), 400
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, name, phone, joined_date FROM members WHERE id = %s AND group_id = %s AND is_system = 0",
+        (member_id, group_id)
+    )
+    member = cursor.fetchone()
+    if not member:
+        cursor.close()
+        return jsonify({"error": "Member not found"}), 404
+    cursor.close()
+
+    # Delegate directly to get_member_details (same function, internal call)
+    return get_member_details(member_id)
+
+
+@app.route('/api/member/set-password', methods=['POST'])
+@require_admin
+def set_member_password():
+    """Admin sets or resets a member's password."""
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    data = request.get_json()
+    member_id = data.get("member_id")
+    new_password = (data.get("password") or "").strip()
+    role = (data.get("role") or "member").strip()
+
+    if not member_id or not new_password:
+        return jsonify({"error": "member_id and password are required"}), 400
+
+    if len(new_password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+
+    if role not in ("admin", "treasurer", "member"):
+        return jsonify({"error": "Invalid role"}), 400
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, is_system FROM members WHERE id = %s AND group_id = %s",
+        (member_id, group_id)
+    )
+    member = cursor.fetchone()
+    if not member:
+        cursor.close()
+        return jsonify({"error": "Member not found"}), 404
+    if member["is_system"]:
+        cursor.close()
+        return jsonify({"error": "Cannot modify system admin via this route"}), 400
+
+    try:
+        cursor.execute(
+            "UPDATE members SET password = %s, role = %s WHERE id = %s AND group_id = %s",
+            (generate_password_hash(new_password), role, member_id, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success", "message": "Password and role updated."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/member/toggle-active', methods=['POST'])
+@require_admin
+def toggle_member_active():
+    """Admin activates or deactivates a member account."""
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    data = request.get_json()
+    member_id = data.get("member_id")
+    is_active = 1 if data.get("is_active") else 0
+
+    if not member_id:
+        return jsonify({"error": "member_id required"}), 400
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, is_system FROM members WHERE id = %s AND group_id = %s",
+        (member_id, group_id)
+    )
+    member = cursor.fetchone()
+    if not member:
+        cursor.close()
+        return jsonify({"error": "Member not found"}), 404
+    if member["is_system"]:
+        cursor.close()
+        return jsonify({"error": "Cannot deactivate system admin"}), 400
+
+    try:
+        cursor.execute(
+            "UPDATE members SET is_active = %s WHERE id = %s AND group_id = %s",
+            (is_active, member_id, group_id)
+        )
+        db.commit()
+        cursor.close()
+        action = "activated" if is_active else "deactivated"
+        return jsonify({"status": "success", "message": f"Member {action}."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/logout', methods=['GET', 'POST'])
+def logout():
+    """Logs out any session type."""
+    session.clear()
+    return redirect("/login")
+
+
 # ==================== MEMBERS ====================
 @app.route('/members-page')
 def members_page():
@@ -1561,12 +1837,14 @@ def get_members():
             "id": member_id,
             "name": m["name"],
             "phone": m["phone"],
+            "role": m.get("role", "member"),
+            "is_active": m.get("is_active", 1),
             "total_contributions": total_contributions,
             "hisa_units": hisa_units,
             "total_loans_committed": total_loans,
             "total_penalties": total_penalties,
             "total_outstanding": remaining_loans,
-            "jamii_paid": 0,  # Simplified for speed
+            "jamii_paid": 0,
             "jamii_expected": 0,
             "jamii_shortfall": 0
         })
@@ -1591,7 +1869,7 @@ def add_member():
     
     cursor = get_cursor(db)
     cursor.execute(
-        "INSERT INTO members (group_id, name, phone, joined_date, is_system) VALUES (%s, %s, %s, %s, 0)",
+        "INSERT INTO members (group_id, name, phone, joined_date, is_system, role, is_active) VALUES (%s, %s, %s, %s, 0, 'member', 1)",
         (group_id, name, phone, datetime.now().strftime("%Y-%m-%d"))
     )
     db.commit()
@@ -2740,6 +3018,7 @@ def record_penalty_payment(penalty_id):
 
 
 @app.route('/api/penalties/<int:penalty_id>/freeze', methods=['POST'])
+@require_treasurer_or_above
 def freeze_penalty(penalty_id):
     """
     Freeze or unfreeze a penalty. When frozen, daily accrual stops.
@@ -2785,6 +3064,7 @@ def freeze_penalty(penalty_id):
 
 
 @app.route('/api/penalties/<int:penalty_id>/forgive-amount', methods=['POST'])
+@require_admin
 def forgive_penalty_amount(penalty_id):
     """
     Record a partial forgiveness amount on a penalty.
@@ -3397,10 +3677,6 @@ def export_raw_backup():
         download_name=f"Kikoba_Backup_Group_{group_id}_{datetime.now().strftime('%Y-%m-%d')}.zip"
     )
 
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/login")
 
 if __name__ == "__main__":
     from models import init_db
