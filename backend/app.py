@@ -178,29 +178,40 @@ def require_any_member(f):
     return decorated
 
 def is_admin_session():
-    """True if the current session belongs to an admin."""
-    return session.get("role") == "admin" or "admin_id" in session
+    """True if the current session belongs to a Kikoba admin."""
+    return (
+        session.get("role") == "admin"
+        and session.get("user_id") is not None
+        and session.get("group_id") is not None
+    )
 
 def is_own_member_data(member_id):
     """True if the logged-in member is accessing their own data."""
     return session.get("member_id") == member_id or is_admin_session()
 
-
 def get_group_admin_member_id(db, group_id):
     cursor = get_cursor(db)
+
     cursor.execute(
         """
         SELECT id
         FROM members
-        WHERE group_id = %s AND is_system = 1
+        WHERE group_id = %s
+          AND role = 'admin'
+          AND is_system = 0
+        ORDER BY id
+        LIMIT 1
         """,
         (group_id,)
     )
+
     row = cursor.fetchone()
     cursor.close()
 
     if not row:
-        raise Exception(f"No system admin member found for group_id={group_id}")
+        raise Exception(
+            f"No Kikoba admin found for group_id={group_id}"
+        )
 
     return row["id"]
 
@@ -923,11 +934,14 @@ def get_total_group_penalty_liability(db, group_id):
 # ==================== ROUTES ====================
 @app.route("/")
 def index():
-    if "admin_id" in session:
-        if "group_id" in session:
-            return redirect("/login")
-        else:
-            return redirect("/create-group")
+    if session.get("user_id"):
+        if session.get("group_id"):
+            if session.get("role") == "admin":
+                return redirect("/dashboard")
+            elif session.get("role") in ("treasurer", "member"):
+                return redirect("/member-portal")
+
+        return redirect("/create-group")
     
     db = get_db()
     cursor = get_cursor(db)
@@ -1175,7 +1189,7 @@ def group_created():
 
 @app.route("/dashboard")
 def dashboard():
-    if "admin_id" not in session:
+    if session.get("role") != "admin" or "user_id" not in session:
         return redirect("/login")
 
     if "group_id" not in session:
@@ -1185,8 +1199,13 @@ def dashboard():
     cursor = get_cursor(db)
 
     cursor.execute(
-        "SELECT name FROM members WHERE id = %s",
-        (session["admin_id"],)
+        """
+        SELECT name
+        FROM members
+        WHERE id = %s
+          AND group_id = %s
+        """,
+        (session["user_id"], session["group_id"])
     )
     admin = cursor.fetchone()
 
@@ -1567,7 +1586,7 @@ def record_jamii_deduction():
 def member_login():
     """Login for regular members (admin, treasurer, member roles)."""
     # Already logged in as system admin → go to dashboard
-    if "admin_id" in session:
+    if session.get("role") == "admin" and session.get("user_id"):
         return redirect("/dashboard")
     # Already logged in as member → go to portal
     if session.get("role") in ("admin", "treasurer", "member"):
@@ -1625,7 +1644,7 @@ def member_login():
 def member_portal():
     """Member self-service portal — read-only view of own data."""
     # Admins using the main dashboard don't need this
-    if "admin_id" in session and session.get("role") == "admin":
+    if session.get("role") == "admin" and session.get("user_id"):
         return redirect("/dashboard")
     member_id = session.get("member_id")
     if not member_id:
@@ -1861,13 +1880,16 @@ def members_page():
 
 @app.route('/member-details/<int:member_id>')
 def member_details_page(member_id):
-    if "admin_id" not in session:
+    if session.get("role") != "admin" or "user_id" not in session:
         return redirect("/login")
-    
+
     if "group_id" not in session:
         return redirect("/create-group")
-    
-    return render_template('member_details.html', member_id=member_id)
+
+    return render_template(
+        "member_details.html",
+        member_id=member_id
+    )
 
 
 @app.route('/api/members/<int:member_id>/details', methods=['GET'])
