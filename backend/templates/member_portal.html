@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-3">
+    <h1 class="fw-bold text-dark">
+        <i class="fas fa-user-circle me-2 text-primary"></i>
+        Welcome, {{ member_name }}
+    </h1>
+    <div>
+        <span class="badge bg-secondary me-2" id="roleLabel">Loading...</span>
+        <a href="/logout" class="btn btn-outline-danger btn-sm">
+            <i class="fas fa-sign-out-alt me-1"></i> Logout
+        </a>
+    </div>
+</div>
+
+<!-- Financial Summary -->
+<div class="card shadow-sm mb-4">
+    <div class="card-header" style="background:linear-gradient(135deg,#667eea,#764ba2);color:white">
+        <h5 class="mb-0"><i class="fas fa-chart-line me-2"></i>My Financial Summary</h5>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-6 col-md-3 mb-3">
+                <div class="p-3 rounded border text-center">
+                    <div class="text-muted small">HISA Units</div>
+                    <div class="fw-bold fs-5 text-primary" id="hisaUnits">—</div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3 mb-3">
+                <div class="p-3 rounded border text-center">
+                    <div class="text-muted small">Total Savings</div>
+                    <div class="fw-bold fs-5 text-success" id="totalSavings">—</div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3 mb-3">
+                <div class="p-3 rounded border text-center">
+                    <div class="text-muted small">Loan Balance</div>
+                    <div class="fw-bold fs-5 text-danger" id="loanBalance">—</div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3 mb-3">
+                <div class="p-3 rounded border text-center">
+                    <div class="text-muted small">Penalties Due</div>
+                    <div class="fw-bold fs-5 text-warning" id="penaltiesDue">—</div>
+                </div>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-6 col-md-4 mb-3">
+                <div class="p-3 rounded border text-center">
+                    <div class="text-muted small">Expected Profit Share</div>
+                    <div class="fw-bold fs-5 text-success" id="profitShare">—</div>
+                </div>
+            </div>
+            <div class="col-6 col-md-4 mb-3">
+                <div class="p-3 rounded border text-center">
+                    <div class="text-muted small">Net Position</div>
+                    <div class="fw-bold fs-5" id="netPosition">—</div>
+                </div>
+            </div>
+            <div class="col-6 col-md-4 mb-3">
+                <div class="p-3 rounded border text-center">
+                    <div class="text-muted small">Expected Payout</div>
+                    <div class="fw-bold fs-5" id="netPayout">—</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Contributions -->
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-success text-white">
+        <h5 class="mb-0"><i class="fas fa-hand-holding-usd me-2"></i>My Contributions</h5>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr><th>Date</th><th>Type</th><th class="text-end">Amount</th></tr>
+                </thead>
+                <tbody id="contribTable">
+                    <tr><td colspan="3" class="text-center text-muted py-3">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Loans -->
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-warning text-dark">
+        <h5 class="mb-0"><i class="fas fa-money-bill-wave me-2"></i>My Loans & Rejesho</h5>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Start</th>
+                        <th class="text-end">Principal</th>
+                        <th class="text-end">Monthly</th>
+                        <th class="text-end">Repaid</th>
+                        <th class="text-end">Remaining</th>
+                        <th>Due</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="loansTable">
+                    <tr><td colspan="7" class="text-center text-muted py-3">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Penalties -->
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-danger text-white">
+        <h5 class="mb-0"><i class="fas fa-exclamation-triangle me-2"></i>My Penalties</h5>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Date</th><th>Type</th>
+                        <th class="text-end">Amount</th>
+                        <th class="text-end">Paid</th>
+                        <th class="text-end">Remaining</th>
+                        <th>Status</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody id="penaltiesTable">
+                    <tr><td colspan="7" class="text-center text-muted py-3">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+function fc(n) {
+    const v = parseFloat(n);
+    return isNaN(v) ? '0 TZS' : v.toLocaleString('en-TZ', {maximumFractionDigits:0}) + ' TZS';
+}
+function sf(n, dp) {
+    const v = parseFloat(n);
+    return isNaN(v) ? '0.00' : v.toFixed(dp);
+}
+const typeColor = {
+    hisa:'primary','hisa anzia':'success',jamii:'info',
+    rejesho:'warning',penalty_payment:'danger'
+};
+
+async function loadPortal() {
+    const res = await fetch('/api/members/{{ member_id }}/details');
+    if (!res.ok) {
+        document.querySelector('.card-body').innerHTML =
+            '<div class="alert alert-danger">Failed to load data. Please refresh.</div>';
+        return;
+    }
+    const data = await res.json();
+    const m  = data.member  || {};
+    const s  = data.summary || {};
+
+    // Role badge
+    const roleMap = {admin:'danger', treasurer:'warning', member:'secondary'};
+    const role = '{{ session.get("role", "member") }}';
+    document.getElementById('roleLabel').textContent = role.charAt(0).toUpperCase() + role.slice(1);
+    document.getElementById('roleLabel').className = `badge bg-${roleMap[role]||'secondary'} me-2`;
+
+    // Summary
+    document.getElementById('hisaUnits').textContent    = sf(s.hisa_units, 2) + ' units';
+    document.getElementById('totalSavings').textContent = fc(s.total_savings);
+    document.getElementById('loanBalance').textContent  = fc(s.remaining_loans);
+    document.getElementById('penaltiesDue').textContent = fc(s.total_penalties);
+    document.getElementById('profitShare').textContent  = fc(s.expected_profit_share);
+
+    const np = parseFloat(s.net_contribution_position) || 0;
+    const no = parseFloat(s.net_payout) || 0;
+    const npEl = document.getElementById('netPosition');
+    const noEl = document.getElementById('netPayout');
+    npEl.textContent = fc(np);
+    noEl.textContent = fc(no);
+    npEl.className = `fw-bold fs-5 ${np >= 0 ? 'text-success' : 'text-danger'}`;
+    noEl.className = `fw-bold fs-5 ${no >= 0 ? 'text-success' : 'text-danger'}`;
+
+    // Contributions
+    const ch = data.contribution_history || [];
+    document.getElementById('contribTable').innerHTML = ch.length ? ch.map(c =>
+        `<tr>
+            <td>${c.date||'—'}</td>
+            <td><span class="badge bg-${typeColor[c.type]||'secondary'}">${c.type}</span></td>
+            <td class="text-end fw-bold">${fc(c.amount)}</td>
+        </tr>`).join('') :
+        '<tr><td colspan="3" class="text-center text-muted">No contributions yet</td></tr>';
+
+    // Loans
+    const loans = data.loans || [];
+    document.getElementById('loansTable').innerHTML = loans.length ? loans.map(l => {
+        const rem = parseFloat(l.remaining) || 0;
+        const sc = {'Active':'success','Overdue':'danger','Cleared':'secondary','Forgiven':'info'};
+        return `<tr>
+            <td>${l.start_date||'—'}</td>
+            <td class="text-end">${fc(l.principal)}</td>
+            <td class="text-end text-info">${fc(l.monthly_rejesho)}</td>
+            <td class="text-end text-success">${fc(l.repaid)}</td>
+            <td class="text-end ${rem>0?'text-danger fw-bold':'text-success'}">${fc(rem)}</td>
+            <td>${l.due_date||'—'}</td>
+            <td><span class="badge bg-${sc[l.status]||'secondary'}">${l.status}</span></td>
+        </tr>`;
+    }).join('') :
+    '<tr><td colspan="7" class="text-center text-muted">No loans</td></tr>';
+
+    // Penalties
+    const pens = data.penalties || [];
+    document.getElementById('penaltiesTable').innerHTML = pens.length ? pens.map(p => {
+        const rem = parseFloat(p.remaining) || 0;
+        const frozen = p.is_frozen === 1 || p.is_frozen === true;
+        const badge = p.type === 'monthly_rejesho_late'
+            ? '<span class="badge bg-danger">Auto</span>'
+            : '<span class="badge bg-warning text-dark">Manual</span>';
+        const statusBadge = frozen
+            ? '<span class="badge bg-info">Frozen</span>'
+            : rem <= 0
+            ? '<span class="badge bg-success">Cleared</span>'
+            : '<span class="badge bg-warning text-dark">Pending</span>';
+        return `<tr>
+            <td>${p.date||'—'}</td>
+            <td>${badge}</td>
+            <td class="text-end">${fc(p.amount)}</td>
+            <td class="text-end text-success">${fc(p.amount_paid)}</td>
+            <td class="text-end ${rem>0?'text-danger fw-bold':'text-success'}">${fc(rem)}</td>
+            <td>${statusBadge}</td>
+            <td><small>${p.description||'—'}</small></td>
+        </tr>`;
+    }).join('') :
+    '<tr><td colspan="7" class="text-center text-muted">No penalties</td></tr>';
+}
+
+document.addEventListener('DOMContentLoaded', loadPortal);
+</script>
+
+{% endblock %}
