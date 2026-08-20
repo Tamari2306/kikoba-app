@@ -3677,10 +3677,6 @@ def export_raw_backup():
         download_name=f"Kikoba_Backup_Group_{group_id}_{datetime.now().strftime('%Y-%m-%d')}.zip"
     )
 
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/login")
 
 if __name__ == "__main__":
     from models import init_db
