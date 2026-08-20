@@ -1076,9 +1076,10 @@ def login():
                         session.clear()
 
                         session["user_id"] = user["id"]
+                        session["member_id"] = user["id"]
                         session["group_id"] = user["group_id"]
                         session["role"] = role
-
+                        session["member_name"] = user["name"]
 
                         if role == "admin":
                             cursor.close()
@@ -1585,11 +1586,13 @@ def record_jamii_deduction():
 @app.route('/member-login', methods=['GET', 'POST'])
 def member_login():
     """Login for regular members (admin, treasurer, member roles)."""
-    # Already logged in as system admin → go to dashboard
+
+    # Admins belong on the main dashboard
     if session.get("role") == "admin" and session.get("user_id"):
         return redirect("/dashboard")
-    # Already logged in as member → go to portal
-    if session.get("role") in ("admin", "treasurer", "member"):
+
+    # Already logged-in treasurer/member
+    if session.get("member_id") and session.get("role") in ("treasurer", "member"):
         return redirect("/member-portal")
 
     db = get_db()
