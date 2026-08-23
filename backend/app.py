@@ -851,35 +851,42 @@ def signup():
     cursor = get_cursor(db)
     
     if request.method == "POST":
-        name = request.form.get("name")
-        email = request.form.get("email")
-        password = request.form.get("password")
+        name     = (request.form.get("name")     or "").strip()
+        phone    = (request.form.get("phone")    or "").strip()
+        email    = (request.form.get("email")    or "").strip()
+        password = (request.form.get("password") or "").strip()
 
-        if not name or not email or not password:
+        if not name or not phone or not email or not password:
             cursor.close()
             return render_template("signup.html", error="All fields are required")
 
-        cursor.execute(
-            "SELECT * FROM members WHERE email=%s AND is_system=1",
-            (email,)
-        )
-        existing = cursor.fetchone()
-        
-        if existing:
+        if len(password) < 6:
+            cursor.close()
+            return render_template("signup.html", error="Password must be at least 6 characters")
+
+        cursor.execute("SELECT id FROM members WHERE email = %s", (email,))
+        if cursor.fetchone():
             cursor.close()
             return render_template("signup.html", error="Email already registered")
 
+        cursor.execute("SELECT id FROM members WHERE phone = %s", (phone,))
+        if cursor.fetchone():
+            cursor.close()
+            return render_template("signup.html", error="Phone number already registered")
+
         cursor.execute("""
-            INSERT INTO members (name, email, password, is_system, joined_date)
-            VALUES (%s, %s, %s, 1, CURRENT_DATE)
+            INSERT INTO members (name, phone, email, password, is_system, role, is_active, joined_date)
+            VALUES (%s, %s, %s, %s, 1, 'admin', 1, CURRENT_DATE)
             RETURNING id
-        """, (name, email, generate_password_hash(password)))
-        
+        """, (name, phone, email, generate_password_hash(password)))
+
         new_admin_id = cursor.fetchone()["id"]
         db.commit()
-        
-        session["user_id"] = new_admin_id
-        session["role"] = "admin"
+
+        session["user_id"]     = new_admin_id
+        session["member_id"]   = new_admin_id
+        session["role"]        = "admin"
+        session["member_name"] = name
         cursor.close()
         return redirect("/create-group")
 
