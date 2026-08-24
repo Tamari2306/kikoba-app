@@ -73,84 +73,15 @@ def get_current_member_id():
     """Return member_id for logged-in regular members."""
     return session.get("member_id")
 
-from functools import wraps
-
 def require_admin(f):
-    """Route decorator: only active Kikoba admins can access."""
-
+    """Route decorator: only admin role can access."""
     @wraps(f)
     def decorated(*args, **kwargs):
-
-        user_id = session.get("user_id")
-        group_id = session.get("group_id")
-
-        # --------------------------------------------------------
-        # User must be logged in and have a Kikoba selected
-        # --------------------------------------------------------
-
-        if not user_id or not group_id:
-
+        if not session.get("user_id") or session.get("role") != "admin":
             if request.is_json or request.path.startswith("/api/"):
-                return jsonify({
-                    "error": "Authentication required"
-                }), 401
-
+                return jsonify({"error": "Admin access required"}), 403
             return redirect("/login")
-
-        db = get_db()
-        cursor = get_cursor(db)
-
-        try:
-
-            # ----------------------------------------------------
-            # Verify the user from the database
-            # ----------------------------------------------------
-
-            cursor.execute(
-                """
-                SELECT id, role, group_id, is_active
-                FROM members
-                WHERE id = %s
-                  AND group_id = %s
-                """,
-                (user_id, group_id)
-            )
-
-            user = cursor.fetchone()
-
-            # ----------------------------------------------------
-            # User does not exist in this Kikoba
-            # ----------------------------------------------------
-
-            if not user:
-
-                if request.is_json or request.path.startswith("/api/"):
-                    return jsonify({
-                        "error": "User not found"
-                    }), 403
-
-                return redirect("/login")
-
-            # ----------------------------------------------------
-            # Account must be active
-            # ----------------------------------------------------
-
-            if not user["is_active"]:
-
-                if request.is_json or request.path.startswith("/api/"):
-                    return jsonify({
-                        "error": "Account is inactive"
-                    }), 403
-                return redirect("/login")
-            if user["role"] != "admin":
-                if request.is_json or request.path.startswith("/api/"):
-                    return jsonify({
-                        "error": "Admin access required"
-                    }), 403
-                return redirect("/login")
-            return f(*args, **kwargs)
-        finally:
-            cursor.close()
+        return f(*args, **kwargs)
     return decorated
 
 def require_treasurer_or_above(f):
@@ -178,101 +109,73 @@ def require_any_member(f):
     return decorated
 
 def is_admin_session():
-    """True if the current session belongs to a Kikoba admin."""
-    return (
-        session.get("role") == "admin"
-        and session.get("user_id") is not None
-        and session.get("group_id") is not None
-    )
+    """True if the current session belongs to an admin."""
+    return session.get("role") == "admin"
 
 def is_own_member_data(member_id):
     """True if the logged-in member is accessing their own data."""
     return session.get("member_id") == member_id or is_admin_session()
 
+
 def get_group_admin_member_id(db, group_id):
     cursor = get_cursor(db)
-
     cursor.execute(
         """
         SELECT id
         FROM members
-        WHERE group_id = %s
-          AND role = 'admin'
-          AND is_system = 0
-        ORDER BY id
-        LIMIT 1
+        WHERE group_id = %s AND is_system = 1
         """,
         (group_id,)
     )
-
     row = cursor.fetchone()
     cursor.close()
 
     if not row:
-        raise Exception(
-            f"No Kikoba admin found for group_id={group_id}"
-        )
+        raise Exception(f"No system admin member found for group_id={group_id}")
 
     return row["id"]
 
 
 # ==================== HELPER FUNCTIONS ====================
 def create_new_group(db, group_name, admin_id):
-    """Create a new Kikoba and assign an existing member as its admin."""
-
+    """Create a new group and associate it with an admin"""
     cursor = get_cursor(db)
 
-    try:
-        # Create the Kikoba
+    cursor.execute("""
+        INSERT INTO groups (name, created_at)
+        VALUES (%s, CURRENT_TIMESTAMP)
+        RETURNING id
+    """, (group_name,))
+
+    group_id = cursor.fetchone()["id"]
+
+    cursor.execute("""
+        UPDATE members SET group_id = %s WHERE id = %s
+    """, (group_id, admin_id))
+
+    defaults = [
+        ('group_name', group_name),
+        ('interest_rate', '0.10'),
+        ('daily_penalty_amount', '1000'),
+        ('leadership_pay_amount', '0'),
+        ('jamii_amount', '2000'),
+        ('jamii_frequency', 'monthly'),
+        ('cycle_start_date', ''),
+        ('cycle_end_date', ''),
+        ('hisa_unit_price', '5000'),
+        ('loan_tier5_amount', '10000000'), 
+        ('loan_tier5_months', '12')         
+    ]
+
+    for key, value in defaults:
         cursor.execute("""
-            INSERT INTO groups (name, created_at)
-            VALUES (%s, CURRENT_TIMESTAMP)
-            RETURNING id
-        """, (group_name,))
+            INSERT INTO settings (group_id, key, value)
+            VALUES (%s, %s, %s)
+        """, (group_id, key, value))
 
-        group_id = cursor.fetchone()["id"]
-
-        # Assign the current user as this Kikoba's admin
-        cursor.execute("""
-            UPDATE members
-            SET
-                group_id = %s,
-                role = 'admin',
-                is_system = 0
-            WHERE id = %s
-        """, (group_id, admin_id))
-
-        # Default Kikoba settings
-        defaults = [
-            ('group_name', group_name),
-            ('interest_rate', '0.10'),
-            ('daily_penalty_amount', '1000'),
-            ('leadership_pay_amount', '0'),
-            ('jamii_amount', '2000'),
-            ('jamii_frequency', 'monthly'),
-            ('cycle_start_date', ''),
-            ('cycle_end_date', ''),
-            ('hisa_unit_price', '5000'),
-            ('loan_tier5_amount', '10000000'),
-            ('loan_tier5_months', '12')
-        ]
-
-        for key, value in defaults:
-            cursor.execute("""
-                INSERT INTO settings (group_id, key, value)
-                VALUES (%s, %s, %s)
-            """, (group_id, key, value))
-
-        db.commit()
-
-        return group_id
-
-    except Exception:
-        db.rollback()
-        raise
-
-    finally:
-        cursor.close()
+    db.commit()
+    cursor.close()
+    return group_id
 
 
 def get_group_settings(db, group_id):
@@ -934,25 +837,12 @@ def get_total_group_penalty_liability(db, group_id):
 # ==================== ROUTES ====================
 @app.route("/")
 def index():
-    if session.get("user_id"):
-        if session.get("group_id"):
-            if session.get("role") == "admin":
-                return redirect("/dashboard")
-            elif session.get("role") in ("treasurer", "member"):
-                return redirect("/member-portal")
-
-        return redirect("/create-group")
-    
-    db = get_db()
-    cursor = get_cursor(db)
-    cursor.execute("SELECT 1 FROM members WHERE is_system=1 LIMIT 1")
-    admin_exists = cursor.fetchone()
-    cursor.close()
-    
-    if admin_exists:
-        return redirect("/login")
-    else:
-        return redirect("/signup")
+    if session.get("user_id") and session.get("group_id"):
+        role = session.get("role")
+        if role in ("admin", "treasurer"):
+            return redirect("/dashboard")
+        return redirect("/member-portal")
+    return redirect("/login")
 
 
 @app.route("/signup", methods=["GET", "POST"])
@@ -988,40 +878,37 @@ def signup():
         new_admin_id = cursor.fetchone()["id"]
         db.commit()
         
-        session["admin_id"] = new_admin_id
+        session["user_id"] = new_admin_id
+        session["role"] = "admin"
         cursor.close()
         return redirect("/create-group")
 
     cursor.close()
     return render_template("signup.html")
 
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    # Already logged in — redirect appropriately
+    if session.get("user_id") and session.get("group_id"):
+        role = session.get("role")
+        if role in ("admin", "treasurer"):
+            return redirect("/dashboard")
+        return redirect("/member-portal")
 
     db = get_db()
     cursor = get_cursor(db)
     error = None
 
     if request.method == "POST":
-
         group_code = (request.form.get("group_code") or "").strip()
-        phone = (request.form.get("phone") or "").strip()
-        password = request.form.get("password") or ""
-
-        # --------------------------------------------------------
-        # Validate input
-        # --------------------------------------------------------
+        phone      = (request.form.get("phone")      or "").strip()
+        password   = request.form.get("password") or ""
 
         if not group_code or not phone or not password:
             error = "Group ID, phone number and password are required."
-
         else:
-
             try:
-                # ------------------------------------------------
-                # Find user inside the specified Kikoba
-                # ------------------------------------------------
-
                 cursor.execute(
                     """
                     SELECT *
@@ -1032,75 +919,40 @@ def login():
                     """,
                     (group_code, phone)
                 )
-
                 user = cursor.fetchone()
 
-                # ------------------------------------------------
-                # User not found
-                # ------------------------------------------------
-
                 if user is None:
-
                     error = "Invalid Group ID, phone number or password."
-
-                # ------------------------------------------------
-                # Account inactive
-                # ------------------------------------------------
-
                 elif not user["is_active"]:
-
                     error = "Your account is inactive. Please contact your Kikoba administrator."
-
-                # ------------------------------------------------
-                # Password incorrect
-                # ------------------------------------------------
-
-                elif not user["password"] or not check_password_hash(
-                    user["password"],
-                    password
-                ):
-
+                elif not user["password"] or not check_password_hash(user["password"], password):
                     error = "Invalid Group ID, phone number or password."
-
                 else:
-
                     role = (user["role"] or "member").strip().lower()
-
-                    # Only allow known roles
                     if role not in ("admin", "treasurer", "member"):
-
                         error = "Your account has an invalid role. Please contact your Kikoba administrator."
-
                     else:
-
                         session.clear()
-
-                        session["user_id"] = user["id"]
-                        session["member_id"] = user["id"]
-                        session["group_id"] = user["group_id"]
-                        session["role"] = role
+                        session["user_id"]     = user["id"]
+                        session["member_id"]   = user["id"]
+                        session["group_id"]    = user["group_id"]
+                        session["role"]        = role
                         session["member_name"] = user["name"]
 
+                        cursor.close()
                         if role == "admin":
-                            cursor.close()
                             return redirect("/dashboard")
-
                         elif role == "treasurer":
-                            cursor.close()
-                            return redirect("/treasurer-portal")
-
+                            return redirect("/dashboard")
                         else:
-                            cursor.close()
                             return redirect("/member-portal")
 
             except Exception as e:
                 print("Login error:", e)
                 error = "An error occurred while trying to log in."
+
     cursor.close()
-    return render_template(
-        "login.html",
-        error=error
-    )
+    return render_template("login.html", error=error)
 
 
 @app.route('/api/groups', methods=['POST'])
@@ -1122,97 +974,55 @@ def create_group_api():
         "group_id": group_id
     })
 
+
 @app.route("/create-group", methods=["GET", "POST"])
 def create_group():
-
-    # User must be logged in
-    if "user_id" not in session:
+    if not session.get("user_id"):
         return redirect("/login")
 
     db = get_db()
     error = None
 
     if request.method == "POST":
-
         group_name = (request.form.get("group_name") or "").strip()
 
         if not group_name:
-
             error = "Group name is required"
-
         else:
-
             try:
-                group_id = create_new_group(
-                    db,
-                    group_name,
-                    session["user_id"]
-                )
-
-                # This user is now the Kikoba admin
+                group_id = create_new_group(db, group_name, session["user_id"])
                 session["group_id"] = group_id
                 session["role"] = "admin"
-
-                # Store information for the success page
-                session["new_group_id"] = group_id
-                session["new_group_name"] = group_name
-
-                return redirect("/group-created")
-
+                return redirect("/dashboard")
             except Exception as e:
-
-                print("Create group error:", e)
-
                 error = "Unable to create the Kikoba. Please try again."
 
-    return render_template(
-        "create_group.html",
-        error=error
-    )
+    return render_template("create_group.html", error=error)
 
-@app.route("/group-created")
-def group_created():
-
-    if "user_id" not in session:
-        return redirect("/login")
-
-    group_id = session.pop("new_group_id", None)
-    group_name = session.pop("new_group_name", None)
-
-    if not group_id:
-        return redirect("/dashboard")
-
-    return render_template(
-        "group_created.html",
-        group_id=group_id,
-        group_name=group_name
-    )
 
 @app.route("/dashboard")
 def dashboard():
-    if session.get("role") != "admin" or "user_id" not in session:
-        return redirect("/login")
+    user_id  = session.get("user_id")
+    group_id = session.get("group_id")
+    role     = session.get("role")
 
-    if "group_id" not in session:
-        return redirect("/create-group")
+    if not user_id or not group_id:
+        return redirect("/login")
+    if role not in ("admin", "treasurer"):
+        return redirect("/member-portal")
 
     db = get_db()
     cursor = get_cursor(db)
 
     cursor.execute(
-        """
-        SELECT name
-        FROM members
-        WHERE id = %s
-          AND group_id = %s
-        """,
-        (session["user_id"], session["group_id"])
+        "SELECT name FROM members WHERE id = %s AND group_id = %s",
+        (user_id, group_id)
     )
     admin = cursor.fetchone()
 
     cursor.execute(
         "SELECT * FROM groups WHERE id = %s",
-        (session["group_id"],)
+        (group_id,)
     )
     group = cursor.fetchone()
     cursor.close()
@@ -1586,13 +1396,11 @@ def record_jamii_deduction():
 @app.route('/member-login', methods=['GET', 'POST'])
 def member_login():
     """Login for regular members (admin, treasurer, member roles)."""
-
-    # Admins belong on the main dashboard
-    if session.get("role") == "admin" and session.get("user_id"):
+    # Already logged in as system admin → go to dashboard
+    if session.get("user_id") and session.get("role") in ("admin", "treasurer"):
         return redirect("/dashboard")
-
-    # Already logged-in treasurer/member
-    if session.get("member_id") and session.get("role") in ("treasurer", "member"):
+    # Already logged in as member → go to portal
+    if session.get("role") in ("admin", "treasurer", "member"):
         return redirect("/member-portal")
 
     db = get_db()
@@ -1620,21 +1428,8 @@ def member_login():
                 WHERE phone = %s AND group_id = %s AND is_system = 0
                 LIMIT 1
             """, (phone, gid))
-
             member = cursor.fetchone()
             cursor.close()
-
-            print(
-                "LOGIN DEBUG:",
-                {
-                    "id": member["id"] if member else None,
-                    "name": member["name"] if member else None,
-                    "group_id": member["group_id"] if member else None,
-                    "role": member["role"] if member else None,
-                    "is_password_none": member["password"] is None if member else None,
-                    "password_length": len(member["password"]) if member and member["password"] else 0,
-                }
-            )
 
             if not member:
                 error = "Member not found in that group"
@@ -1660,7 +1455,7 @@ def member_login():
 def member_portal():
     """Member self-service portal — read-only view of own data."""
     # Admins using the main dashboard don't need this
-    if session.get("role") == "admin" and session.get("user_id"):
+    if session.get("role") in ("admin", "treasurer"):
         return redirect("/dashboard")
     member_id = session.get("member_id")
     if not member_id:
@@ -1716,127 +1511,51 @@ def get_my_details():
 @app.route('/api/member/set-password', methods=['POST'])
 @require_admin
 def set_member_password():
-    """Kikoba admin sets/resets a member's password and role."""
-
+    """Admin sets or resets a member's password."""
     db = get_db()
     group_id = get_current_group_id()
-
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
 
-    data = request.get_json() or {}
-
+    data = request.get_json()
     member_id = data.get("member_id")
     new_password = (data.get("password") or "").strip()
-    role = (data.get("role") or "member").strip().lower()
-
-    # ------------------------------------------------------------
-    # Validate input
-    # ------------------------------------------------------------
+    role = (data.get("role") or "member").strip()
 
     if not member_id or not new_password:
-        return jsonify({
-            "error": "member_id and password are required"
-        }), 400
+        return jsonify({"error": "member_id and password are required"}), 400
 
     if len(new_password) < 6:
-        return jsonify({
-            "error": "Password must be at least 6 characters"
-        }), 400
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
 
-    # Admin can only assign member or treasurer
-    if role not in ("member", "treasurer"):
-        return jsonify({
-            "error": "Invalid role. Admin can only assign member or treasurer."
-        }), 403
+    if role not in ("admin", "treasurer", "member"):
+        return jsonify({"error": "Invalid role"}), 400
 
     cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, is_system FROM members WHERE id = %s AND group_id = %s",
+        (member_id, group_id)
+    )
+    member = cursor.fetchone()
+    if not member:
+        cursor.close()
+        return jsonify({"error": "Member not found"}), 404
+    if member["is_system"]:
+        cursor.close()
+        return jsonify({"error": "Cannot modify system admin via this route"}), 400
 
     try:
-
-        # --------------------------------------------------------
-        # Find the member inside the current Kikoba
-        # --------------------------------------------------------
-
         cursor.execute(
-            """
-            SELECT id, is_system, role
-            FROM members
-            WHERE id = %s
-              AND group_id = %s
-            """,
-            (member_id, group_id)
-        )
-
-        member = cursor.fetchone()
-
-        if not member:
-            return jsonify({
-                "error": "Member not found"
-            }), 404
-
-        # --------------------------------------------------------
-        # Do not modify the existing system account
-        #
-        # This protects your existing admin account while we
-        # transition away from using is_system for authorization.
-        # --------------------------------------------------------
-
-        if member["is_system"] == 1:
-            return jsonify({
-                "error": "This account cannot be modified through this route"
-            }), 400
-
-        # --------------------------------------------------------
-        # Prevent the logged-in admin from changing their own
-        # password/role through the member-management endpoint
-        # --------------------------------------------------------
-
-        current_user_id = session.get("user_id")
-
-        if current_user_id and str(member_id) == str(current_user_id):
-            return jsonify({
-                "error": "You cannot change your own password or role here"
-            }), 400
-
-        # --------------------------------------------------------
-        # Generate password hash
-        # --------------------------------------------------------
-
-        password_hash = generate_password_hash(new_password)
-
-        # --------------------------------------------------------
-        # Update member
-        # --------------------------------------------------------
-
-        cursor.execute(
-            """
-            UPDATE members
-            SET password = %s,
-                role = %s
-            WHERE id = %s
-              AND group_id = %s
-            """,
-            (
-                password_hash,
-                role,
-                member_id,
-                group_id
-            )
+            "UPDATE members SET password = %s, role = %s WHERE id = %s AND group_id = %s",
+            (generate_password_hash(new_password), role, member_id, group_id)
         )
         db.commit()
-        return jsonify({
-            "status": "success",
-            "message": "Member access updated successfully.",
-            "role": role
-        }), 200
+        cursor.close()
+        return jsonify({"status": "success", "message": "Password and role updated."})
     except Exception as e:
         db.rollback()
-        return jsonify({
-            "error": str(e)
-        }), 500
-    finally:
         cursor.close()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/member/toggle-active', methods=['POST'])
@@ -1883,8 +1602,9 @@ def toggle_member_active():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/logout")
+@app.route('/logout', methods=['GET', 'POST'])
 def logout():
+    """Logs out any session type."""
     session.clear()
     return redirect("/login")
 
@@ -1892,20 +1612,18 @@ def logout():
 # ==================== MEMBERS ====================
 @app.route('/members-page')
 def members_page():
+    if not session.get("user_id") or session.get("role") not in ("admin", "treasurer"):
+        return redirect("/login")
     return render_template('members.html')
 
 @app.route('/member-details/<int:member_id>')
 def member_details_page(member_id):
-    if session.get("role") != "admin" or "user_id" not in session:
+    if not session.get("user_id") or not session.get("group_id"):
         return redirect("/login")
-
-    if "group_id" not in session:
-        return redirect("/create-group")
-
-    return render_template(
-        "member_details.html",
-        member_id=member_id
-    )
+    if session.get("role") not in ("admin", "treasurer"):
+        return redirect("/member-portal")
+    
+    return render_template('member_details.html', member_id=member_id)
 
 
 @app.route('/api/members/<int:member_id>/details', methods=['GET'])
@@ -3989,7 +3707,6 @@ def export_raw_backup():
         as_attachment=True,
         download_name=f"Kikoba_Backup_Group_{group_id}_{datetime.now().strftime('%Y-%m-%d')}.zip"
     )
-
 
 if __name__ == "__main__":
     from models import init_db

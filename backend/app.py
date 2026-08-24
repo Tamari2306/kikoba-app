@@ -24,6 +24,24 @@ import psycopg2.extras
 from config import Config
 import calendar
 
+# Optional dependencies used during application initialization.
+try:
+    from flask_mail import Mail, Message
+    MAIL_AVAILABLE = True
+except ImportError:
+    MAIL_AVAILABLE = False
+    Mail = None
+    Message = None
+
+try:
+    from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
+    TOKENS_AVAILABLE = True
+except ImportError:
+    TOKENS_AVAILABLE = False
+    URLSafeTimedSerializer = None
+    SignatureExpired = Exception
+    BadSignature = Exception
+
 
 app = Flask(__name__, static_folder="static")
 app.config.from_object(Config)
