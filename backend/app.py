@@ -34,6 +34,16 @@ env = os.environ.get('FLASK_ENV', 'development')
 # Initialize CORS
 CORS(app, origins=app.config['CORS_ORIGINS'])
 
+# ── Email / Password Reset ────────────────────────────────────────────
+app.config["MAIL_SERVER"]         = os.environ.get("MAIL_SERVER",   "smtp.gmail.com")
+app.config["MAIL_PORT"]           = int(os.environ.get("MAIL_PORT", 587))
+app.config["MAIL_USE_TLS"]        = True
+app.config["MAIL_USERNAME"]       = os.environ.get("MAIL_USERNAME", "")
+app.config["MAIL_PASSWORD"]       = os.environ.get("MAIL_PASSWORD", "")
+app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "noreply@kikoba.app")
+mail = Mail(app)
+ts   = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+
 # Initialize database teardown
 init_db_app(app)
 
@@ -1034,14 +1044,17 @@ def dashboard():
     group = cursor.fetchone()
     cursor.close()
 
+    show_group_id_banner = session.pop("show_group_id_banner", False)
     return render_template(
         "dashboard.html",
         admin=admin,
-        group=group
+        group=group,
+        show_group_id_banner=show_group_id_banner
     )
 
 
 @app.route('/api/dashboard', methods=['GET'])
+@require_any_member
 def get_dashboard_data():
     db = get_db()
     group_id = get_current_group_id()
@@ -1120,6 +1133,7 @@ def get_dashboard_data():
 # ==================== CONFIGURATION ROUTES ====================
 
 @app.route('/api/loan_rules', methods=['GET'])
+@require_treasurer_or_above
 def get_loan_rules_api():
     db = get_db()
     group_id = get_current_group_id()
@@ -1139,6 +1153,7 @@ def get_loan_rules_api():
 
 
 @app.route('/api/loan_rules', methods=['POST'])
+@require_admin
 def save_loan_rules_api():
     db = get_db()
     group_id = get_current_group_id()
@@ -1176,9 +1191,14 @@ def save_loan_rules_api():
 
 
 @app.route('/api/settings', methods=['GET', 'POST'])
+@require_treasurer_or_above
 def handle_settings():
     db = get_db()
     group_id = get_current_group_id()
+
+    # Only admins can write settings
+    if request.method == 'POST' and session.get('role') != 'admin':
+        return jsonify({"error": "Admin access required to change settings"}), 403
     
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
@@ -1235,6 +1255,7 @@ def handle_settings():
 
 
 @app.route('/api/constitution/upload', methods=['POST'])
+@require_admin
 def upload_constitution():
     db = get_db()
     group_id = get_current_group_id()
@@ -1272,6 +1293,7 @@ def upload_constitution():
 
 
 @app.route("/constitution/view")
+@require_treasurer_or_above
 def view_constitution():
     db = get_db()
     group_id = get_current_group_id()
@@ -1298,6 +1320,7 @@ def view_constitution():
 
 
 @app.route("/constitution/download")
+@require_treasurer_or_above
 def download_constitution():
     db = get_db()
     group_id = get_current_group_id()
@@ -1324,6 +1347,7 @@ def download_constitution():
 
 
 @app.route('/api/constitution/status', methods=['GET'])
+@require_treasurer_or_above
 def constitution_status():
     db = get_db()
     group_id = get_current_group_id()
@@ -1355,6 +1379,7 @@ def constitution_status():
 
 
 @app.route('/api/jamii_deduction', methods=['POST'])
+@require_admin
 def record_jamii_deduction():
     db = get_db()
     group_id = get_current_group_id()
@@ -1609,6 +1634,103 @@ def toggle_member_active():
         return jsonify({"error": str(e)}), 500
 
 
+
+# ==================== PASSWORD RESET ====================
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    """Step 1: Member enters their email to request a reset link."""
+    if request.method == 'GET':
+        return render_template('forgot_password.html')
+
+    email = (request.form.get('email') or '').strip()
+    if not email:
+        return render_template('forgot_password.html', error="Email is required.")
+
+    db = get_db()
+    cursor = get_cursor(db)
+    cursor.execute("SELECT id, name, email FROM members WHERE email = %s LIMIT 1", (email,))
+    member = cursor.fetchone()
+    cursor.close()
+
+    # Always show success to prevent email enumeration
+    if member:
+        try:
+            token = ts.dumps(email, salt='password-reset-salt')
+            reset_url = f"{request.host_url.rstrip('/')}reset-password/{token}"
+
+            msg = Message(
+                subject="Kikoba App — Password Reset",
+                recipients=[email]
+            )
+            msg.html = f"""
+            <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:24px;border:1px solid #e9ecef;border-radius:12px;">
+                <div style="text-align:center;margin-bottom:20px;">
+                    <h2 style="color:#198754;">Kikoba App</h2>
+                </div>
+                <p>Hello <strong>{member['name']}</strong>,</p>
+                <p>You requested a password reset. Click the button below to set a new password.
+                   This link expires in <strong>1 hour</strong>.</p>
+                <div style="text-align:center;margin:28px 0;">
+                    <a href="{reset_url}"
+                       style="background:#198754;color:white;padding:12px 28px;border-radius:8px;
+                              text-decoration:none;font-weight:bold;font-size:15px;">
+                        Reset My Password
+                    </a>
+                </div>
+                <p style="color:#6c757d;font-size:13px;">
+                    If you didn't request this, ignore this email — your password won't change.
+                </p>
+            </div>
+            """
+            mail.send(msg)
+        except Exception as e:
+            print("Mail error:", e)
+            # Fail silently — don't reveal mail errors to user
+
+    return render_template('forgot_password.html',
+                           success="If that email is registered, a reset link has been sent.")
+
+
+@app.route('/reset-password/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    """Step 2: Member clicks link, sets new password."""
+    try:
+        email = ts.loads(token, salt='password-reset-salt', max_age=3600)
+    except SignatureExpired:
+        return render_template('reset_password.html',
+                               error="This reset link has expired. Please request a new one.",
+                               token=None)
+    except BadSignature:
+        return render_template('reset_password.html',
+                               error="Invalid reset link.",
+                               token=None)
+
+    if request.method == 'GET':
+        return render_template('reset_password.html', token=token, error=None)
+
+    password  = (request.form.get('password')  or '').strip()
+    confirm   = (request.form.get('confirm')   or '').strip()
+
+    if not password or len(password) < 6:
+        return render_template('reset_password.html', token=token,
+                               error="Password must be at least 6 characters.")
+    if password != confirm:
+        return render_template('reset_password.html', token=token,
+                               error="Passwords do not match.")
+
+    db = get_db()
+    cursor = get_cursor(db)
+    cursor.execute(
+        "UPDATE members SET password = %s WHERE email = %s",
+        (generate_password_hash(password), email)
+    )
+    db.commit()
+    cursor.close()
+
+    return render_template('reset_password.html', token=None,
+                           success="Password updated! You can now log in.")
+
 @app.route('/logout', methods=['GET', 'POST'])
 def logout():
     """Logs out any session type."""
@@ -1618,22 +1740,19 @@ def logout():
 
 # ==================== MEMBERS ====================
 @app.route('/members-page')
+@require_treasurer_or_above
 def members_page():
-    if not session.get("user_id") or session.get("role") not in ("admin", "treasurer"):
-        return redirect("/login")
     return render_template('members.html')
 
 @app.route('/member-details/<int:member_id>')
+@require_treasurer_or_above
 def member_details_page(member_id):
-    if not session.get("user_id") or not session.get("group_id"):
-        return redirect("/login")
-    if session.get("role") not in ("admin", "treasurer"):
-        return redirect("/member-portal")
     
     return render_template('member_details.html', member_id=member_id)
 
 
 @app.route('/api/members/<int:member_id>/details', methods=['GET'])
+@require_any_member
 def get_member_details(member_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -1802,6 +1921,7 @@ def get_member_details(member_id):
     })
 
 @app.route('/api/members', methods=['GET'])
+@require_treasurer_or_above
 def get_members():
     db = get_db()
     group_id = get_current_group_id()
@@ -1891,6 +2011,7 @@ def get_members():
 
 
 @app.route('/api/members', methods=['POST'])
+@require_admin
 def add_member():
     db = get_db()
     group_id = get_current_group_id()
@@ -1917,6 +2038,7 @@ def add_member():
 
 
 @app.route('/api/members/<int:member_id>', methods=['PUT', 'DELETE'])
+@require_admin
 def edit_member(member_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -1991,11 +2113,13 @@ def edit_member(member_id):
 # ==================== CONTRIBUTIONS ====================
 
 @app.route('/contributions-page')
+@require_treasurer_or_above
 def contributions_page():
     return render_template('contributions.html')
 
 
 @app.route('/api/contributions', methods=['GET'])
+@require_treasurer_or_above
 def get_contributions():
     db = get_db()
     group_id = get_current_group_id()
@@ -2019,6 +2143,7 @@ def get_contributions():
 
 
 @app.route('/api/contributions', methods=['POST'])
+@require_treasurer_or_above
 def add_contribution():
     db = get_db()
     group_id = get_current_group_id()
@@ -2075,6 +2200,7 @@ def add_contribution():
 
 
 @app.route('/api/contributions/<int:contribution_id>', methods=['PUT', 'DELETE'])
+@require_admin
 def edit_contribution(contribution_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2148,11 +2274,13 @@ def edit_contribution(contribution_id):
 # ==================== LOANS ====================
 
 @app.route('/loans-page')
+@require_treasurer_or_above
 def loans_page():
     return render_template('loans.html')
 
 
 @app.route('/api/loans', methods=['GET'])
+@require_treasurer_or_above
 def get_loans():
     db = get_db()
     group_id = get_current_group_id()
@@ -2220,6 +2348,7 @@ def get_loans():
 
 
 @app.route('/api/loans/preview', methods=['POST'])
+@require_treasurer_or_above
 def preview_loan():
     db = get_db()
     group_id = get_current_group_id()
@@ -2301,6 +2430,7 @@ def preview_loan():
     })
 
 @app.route('/api/loans', methods=['POST'])
+@require_treasurer_or_above
 def add_loan():
     db = get_db()
     group_id = get_current_group_id()
@@ -2445,6 +2575,7 @@ def add_loan():
 
 
 @app.route('/api/loans/<int:loan_id>', methods=['PUT', 'DELETE'])
+@require_admin
 def edit_loan(loan_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2521,6 +2652,7 @@ def edit_loan(loan_id):
 
 
 @app.route('/api/loans/<int:loan_id>/forgive', methods=['POST'])
+@require_admin
 def forgive_loan(loan_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2576,6 +2708,7 @@ def forgive_loan(loan_id):
 
 
 @app.route('/api/loans/<int:loan_id>/unforgive', methods=['POST'])
+@require_admin
 def unforgive_loan(loan_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2617,6 +2750,7 @@ def unforgive_loan(loan_id):
 
 
 @app.route('/loans-page/download', methods=['GET'])
+@require_treasurer_or_above
 def download_loans_pdf():
     db = get_db()
     group_id = get_current_group_id()
@@ -2761,12 +2895,14 @@ def download_loans_pdf():
 # ==================== REJESHO (REPAYMENTS) ====================
 
 @app.route('/repayments-page')
+@require_treasurer_or_above
 def repayments_page():
     loan_id = request.args.get('loan_id')
     return render_template('repayments.html', loan_id=loan_id)
 
 
 @app.route('/api/rejesho', methods=['POST'])
+@require_treasurer_or_above
 def add_rejesho():
     db = get_db()
     group_id = get_current_group_id()
@@ -2813,6 +2949,7 @@ def add_rejesho():
 
 
 @app.route('/api/rejesho/<int:loan_id>', methods=['GET'])
+@require_treasurer_or_above
 def get_rejesho_history(loan_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2865,6 +3002,7 @@ def get_rejesho_history(loan_id):
 
 
 @app.route('/api/rejesho/<int:rejesho_id>', methods=['DELETE'])
+@require_admin
 def delete_rejesho(rejesho_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2904,11 +3042,13 @@ def delete_rejesho(rejesho_id):
 
 
 @app.route('/penalties-page')
+@require_treasurer_or_above
 def penalties_page():
     return render_template('penalties.html')
 
 
 @app.route('/api/penalties', methods=['GET'])
+@require_treasurer_or_above
 def get_penalties():
     db = get_db()
     group_id = get_current_group_id()
@@ -2952,6 +3092,7 @@ def get_penalties():
 
 
 @app.route('/api/penalties', methods=['POST'])
+@require_treasurer_or_above
 def add_penalty():
     db = get_db()
     group_id = get_current_group_id()
@@ -2995,6 +3136,7 @@ def add_penalty():
 
 
 @app.route('/api/record_penalty_payment/<int:penalty_id>', methods=['POST'])
+@require_treasurer_or_above
 def record_penalty_payment(penalty_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -3165,6 +3307,7 @@ def forgive_penalty_amount(penalty_id):
 
 
 @app.route('/api/penalties/<int:penalty_id>', methods=['PUT', 'DELETE'])
+@require_admin
 def edit_penalty(penalty_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -3243,6 +3386,7 @@ def edit_penalty(penalty_id):
     
 
 @app.route('/penalties-page/download', methods=['GET'])
+@require_treasurer_or_above
 def download_penalties_pdf():
     db = get_db()
     group_id = get_current_group_id()
@@ -3318,10 +3462,12 @@ def download_penalties_pdf():
 # ==================== PROFITS ====================
 
 @app.route('/profits-page')
+@require_admin
 def profits_page():
     return render_template('profits.html')
 
 @app.route('/api/profits', methods=['POST'])
+@require_admin
 def calculate_profits():
     db = get_db()
     group_id = get_current_group_id()
@@ -3434,10 +3580,12 @@ def calculate_profits():
 # ==================== REPORTS ====================
 
 @app.route('/reports-page')
+@require_treasurer_or_above
 def reports_page():
     return render_template("reports.html")
 
 @app.route('/api/reports', methods=['GET'])
+@require_treasurer_or_above
 def get_report_data():
     db = get_db()
     group_id = get_current_group_id()
@@ -3518,6 +3666,7 @@ def get_report_data():
 
 
 @app.route('/reports-page/download', methods=['GET'])
+@require_treasurer_or_above
 def download_report_pdf():
     db = get_db()
     group_id = get_current_group_id()
@@ -3615,6 +3764,7 @@ def download_report_pdf():
 # ==================== BACKUP & EXPORT ====================
 
 @app.route('/api/backup/export', methods=['GET'])
+@require_admin
 def export_raw_backup():
     db = get_db()
     group_id = get_current_group_id()

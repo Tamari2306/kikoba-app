@@ -1,6 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
 
+{% if show_group_id_banner %}
+<div class="alert alert-success alert-dismissible fade show d-flex align-items-center gap-3 mb-4" role="alert">
+    <i class="fas fa-check-circle fa-2x text-success"></i>
+    <div>
+        <strong>Kikoba created successfully!</strong><br>
+        Your <strong>Group ID is: {{ group.id }}</strong> &mdash; share this with your members so they can log in.
+    </div>
+    <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert"></button>
+</div>
+{% endif %}
+
 <div class="d-flex justify-content-between align-items-center mb-4">
     <div>
     <h2 id="group-name-header" class="fw-bold text-success border-bottom pb-1">
