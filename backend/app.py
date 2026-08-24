@@ -41,8 +41,8 @@ app.config["MAIL_USE_TLS"]        = True
 app.config["MAIL_USERNAME"]       = os.environ.get("MAIL_USERNAME", "")
 app.config["MAIL_PASSWORD"]       = os.environ.get("MAIL_PASSWORD", "")
 app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "noreply@kikoba.app")
-mail = Mail(app)
-ts   = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+mail = Mail(app) if MAIL_AVAILABLE else None
+ts   = URLSafeTimedSerializer(app.config["SECRET_KEY"]) if TOKENS_AVAILABLE else None
 
 # Initialize database teardown
 init_db_app(app)
@@ -74,6 +74,23 @@ def get_current_group_id():
 # ==================== ROLE-BASED ACCESS CONTROL ====================
 
 from functools import wraps
+try:
+    from flask_mail import Mail, Message
+    MAIL_AVAILABLE = True
+except ImportError:
+    MAIL_AVAILABLE = False
+    Mail = None
+    Message = None
+    print("WARNING: flask_mail not installed. Run: pip install flask-mail")
+try:
+    from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
+    TOKENS_AVAILABLE = True
+except ImportError:
+    TOKENS_AVAILABLE = False
+    URLSafeTimedSerializer = None
+    SignatureExpired = Exception
+    BadSignature = Exception
+    print("WARNING: itsdangerous not installed. Run: pip install itsdangerous")
 
 def get_current_role():
     """Return the role of the currently logged-in user (admin or member)."""
@@ -1010,6 +1027,8 @@ def create_group():
                 group_id = create_new_group(db, group_name, session["user_id"])
                 session["group_id"] = group_id
                 session["role"] = "admin"
+                session["show_group_id_banner"] = True
+                generate_monthly_bill(db, group_id)
                 return redirect("/dashboard")
             except Exception as e:
                 error = "Unable to create the Kikoba. Please try again."
@@ -1654,7 +1673,7 @@ def forgot_password():
     cursor.close()
 
     # Always show success to prevent email enumeration
-    if member:
+    if member and mail and ts:
         try:
             token = ts.dumps(email, salt='password-reset-salt')
             reset_url = f"{request.host_url.rstrip('/')}reset-password/{token}"
@@ -1695,6 +1714,10 @@ def forgot_password():
 @app.route('/reset-password/<token>', methods=['GET', 'POST'])
 def reset_password(token):
     """Step 2: Member clicks link, sets new password."""
+    if not ts:
+        return render_template('reset_password.html',
+                               error="Password reset is not configured. Contact your admin.",
+                               token=None)
     try:
         email = ts.loads(token, salt='password-reset-salt', max_age=3600)
     except SignatureExpired:
@@ -1737,6 +1760,338 @@ def logout():
     session.clear()
     return redirect("/login")
 
+
+
+# ==================== SUBSCRIPTION SYSTEM ====================
+
+RATE_PER_MEMBER = 1000  # TZS per member per month
+GRACE_DAYS      = 7
+
+
+def get_group_subscription_status(db, group_id):
+    """
+    Returns dict with:
+      status: 'active' | 'free' | 'grace' | 'suspended'
+      days_remaining: int (negative if expired)
+      grace_until: date or None
+      is_free: bool
+    """
+    cursor = get_cursor(db)
+    cursor.execute(
+        """SELECT subscription_status, subscription_expires,
+                  grace_until, is_free
+           FROM groups WHERE id = %s""",
+        (group_id,)
+    )
+    row = cursor.fetchone()
+    cursor.close()
+
+    if not row:
+        return {"status": "active", "is_free": False, "days_remaining": 0}
+
+    is_free   = bool(row["is_free"])
+    status    = row["subscription_status"] or "active"
+    expires   = row["subscription_expires"]
+    grace_end = row["grace_until"]
+    today     = date.today()
+
+    if is_free or status == "free":
+        return {"status": "free", "is_free": True, "days_remaining": 999,
+                "grace_until": None}
+
+    if expires is None:
+        return {"status": "active", "is_free": False, "days_remaining": 999,
+                "grace_until": None}
+
+    if isinstance(expires, str):
+        expires = datetime.strptime(expires, "%Y-%m-%d").date()
+    if isinstance(grace_end, str):
+        grace_end = datetime.strptime(grace_end, "%Y-%m-%d").date()
+
+    days_remaining = (expires - today).days
+
+    if days_remaining >= 0:
+        return {"status": "active", "is_free": False,
+                "days_remaining": days_remaining, "grace_until": grace_end}
+
+    if grace_end and today <= grace_end:
+        days_grace_left = (grace_end - today).days
+        return {"status": "grace", "is_free": False,
+                "days_remaining": days_grace_left, "grace_until": grace_end}
+
+    return {"status": "suspended", "is_free": False,
+            "days_remaining": days_remaining, "grace_until": grace_end}
+
+
+def generate_monthly_bill(db, group_id):
+    """
+    Generate a subscription record for the current month if one doesn't exist.
+    Called when a new group is created or at month-end by a cron/scheduler.
+    """
+    today        = date.today()
+    period_start = today.replace(day=1)
+    # Last day of month
+    last_day     = calendar.monthrange(today.year, today.month)[1]
+    period_end   = today.replace(day=last_day)
+
+    cursor = get_cursor(db)
+
+    # Check if bill already exists for this period
+    cursor.execute(
+        "SELECT id FROM subscriptions WHERE group_id=%s AND period_start=%s",
+        (group_id, period_start)
+    )
+    if cursor.fetchone():
+        cursor.close()
+        return  # Already billed this month
+
+    # Count non-system members
+    cursor.execute(
+        "SELECT COUNT(*) FROM members WHERE group_id=%s AND is_system=0 AND is_active=1",
+        (group_id,)
+    )
+    member_count = get_single_value(cursor, 0)
+
+    # Check if group is free
+    cursor.execute("SELECT is_free FROM groups WHERE id=%s", (group_id,))
+    grp = cursor.fetchone()
+    is_free = grp and bool(grp["is_free"])
+
+    amount_due = 0 if is_free else member_count * RATE_PER_MEMBER
+    status     = "free" if is_free else "unpaid"
+
+    cursor.execute(
+        """INSERT INTO subscriptions
+           (group_id, period_start, period_end, member_count, amount_due, status)
+           VALUES (%s, %s, %s, %s, %s, %s)
+           ON CONFLICT (group_id, period_start) DO NOTHING""",
+        (group_id, period_start, period_end, member_count, amount_due, status)
+    )
+    db.commit()
+    cursor.close()
+
+
+def check_subscription_access(group_id, role):
+    """
+    Call this at the start of protected routes.
+    Returns (allowed: bool, read_only: bool, message: str)
+    """
+    db = get_db()
+    sub = get_group_subscription_status(db, group_id)
+    status = sub["status"]
+
+    if status in ("active", "free"):
+        return True, False, None
+
+    if status == "grace":
+        msg = (f"⚠️ Subscription expires in {sub['days_remaining']} day(s). "
+               f"Please pay {RATE_PER_MEMBER:,} TZS × members to continue.")
+        return True, False, msg  # Full access but show warning
+
+    if status == "suspended":
+        if role == "admin":
+            return True, True, "🔒 Subscription suspended. Read-only access. Contact support to renew."
+        return False, False, "🔒 Group subscription has expired. Contact your admin."
+
+    return True, False, None
+
+
+@app.before_request
+def enforce_subscription():
+    """
+    Check subscription status before every request.
+    Skip auth routes, static files, and owner routes.
+    """
+    skip_paths = (
+        "/login", "/logout", "/signup", "/forgot-password",
+        "/reset-password", "/member-login", "/static",
+        "/api/subscription", "/owner"
+    )
+    if any(request.path.startswith(p) for p in skip_paths):
+        return None
+
+    group_id = session.get("group_id")
+    role     = session.get("role")
+
+    if not group_id or not role:
+        return None  # Not logged in — let auth decorators handle it
+
+    allowed, read_only, message = check_subscription_access(group_id, role)
+
+    if not allowed:
+        # Member blocked — clear session and show message
+        session.clear()
+        return render_template("subscription_expired.html",
+                               message=message), 403
+
+    if read_only:
+        # Admin suspended — allow GET only
+        if request.method != "GET":
+            if request.is_json or request.path.startswith("/api/"):
+                return jsonify({
+                    "error": "Subscription suspended. Read-only access only.",
+                    "suspended": True
+                }), 403
+        session["subscription_read_only"] = True
+        session["subscription_message"]   = message
+    elif message:
+        # Grace period warning
+        session["subscription_message"] = message
+    else:
+        session.pop("subscription_message",   None)
+        session.pop("subscription_read_only", None)
+
+
+# ── Subscription API (owner use) ─────────────────────────────────────
+
+@app.route('/api/subscription/mark-paid', methods=['POST'])
+def mark_subscription_paid():
+    """Owner manually marks a subscription as paid."""
+    # Simple owner token check — replace with proper owner auth in Stage 4
+    owner_token = request.headers.get("X-Owner-Token")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data             = request.get_json()
+    group_id         = data.get("group_id")
+    period_start     = data.get("period_start")
+    amount_paid      = data.get("amount_paid", 0)
+    payment_ref      = data.get("payment_reference", "")
+
+    if not group_id or not period_start:
+        return jsonify({"error": "group_id and period_start required"}), 400
+
+    db = get_db()
+    cursor = get_cursor(db)
+
+    try:
+        # Update subscription record
+        cursor.execute(
+            """UPDATE subscriptions
+               SET amount_paid       = %s,
+                   status            = 'paid',
+                   payment_reference = %s,
+                   paid_at           = NOW()
+               WHERE group_id=%s AND period_start=%s""",
+            (amount_paid, payment_ref, group_id, period_start)
+        )
+
+        # Extend group access by 1 month from period end
+        cursor.execute(
+            "SELECT period_end FROM subscriptions WHERE group_id=%s AND period_start=%s",
+            (group_id, period_start)
+        )
+        sub = cursor.fetchone()
+        if sub:
+            period_end = sub["period_end"]
+            if isinstance(period_end, str):
+                period_end = datetime.strptime(period_end, "%Y-%m-%d").date()
+            grace_until = period_end + timedelta(days=GRACE_DAYS)
+
+            cursor.execute(
+                """UPDATE groups
+                   SET subscription_status  = 'active',
+                       subscription_expires = %s,
+                       grace_until          = %s
+                   WHERE id = %s""",
+                (period_end, grace_until, group_id)
+            )
+
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success", "message": "Payment recorded and access extended."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/subscription/toggle-free', methods=['POST'])
+def toggle_group_free():
+    """Owner manually marks a group as free (no billing)."""
+    owner_token = request.headers.get("X-Owner-Token")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data     = request.get_json()
+    group_id = data.get("group_id")
+    is_free  = 1 if data.get("is_free") else 0
+
+    if not group_id:
+        return jsonify({"error": "group_id required"}), 400
+
+    db = get_db()
+    cursor = get_cursor(db)
+    try:
+        cursor.execute(
+            """UPDATE groups
+               SET is_free             = %s,
+                   subscription_status = %s,
+                   subscription_expires = CASE WHEN %s = 1 THEN '2099-12-31' ELSE subscription_expires END
+               WHERE id = %s""",
+            (is_free, 'free' if is_free else 'active', is_free, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success", "message": f"Group {'set to free' if is_free else 'set to paid'}."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/subscription/generate-bill', methods=['POST'])
+def generate_bill():
+    """Generate month-end bill for a group (or all groups)."""
+    owner_token = request.headers.get("X-Owner-Token")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data     = request.get_json()
+    group_id = data.get("group_id")  # None = all groups
+
+    db = get_db()
+    cursor = get_cursor(db)
+
+    if group_id:
+        group_ids = [group_id]
+    else:
+        cursor.execute("SELECT id FROM groups")
+        group_ids = [r["id"] for r in cursor.fetchall()]
+    cursor.close()
+
+    for gid in group_ids:
+        generate_monthly_bill(db, gid)
+
+    return jsonify({"status": "success", "message": f"Bills generated for {len(group_ids)} group(s)."})
+
+
+@app.route('/api/subscription/status', methods=['GET'])
+@require_any_member
+def get_subscription_status():
+    """Any logged-in user can check their group's subscription status."""
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    db  = get_db()
+    sub = get_group_subscription_status(db, group_id)
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        """SELECT * FROM subscriptions
+           WHERE group_id = %s
+           ORDER BY period_start DESC
+           LIMIT 6""",
+        (group_id,)
+    )
+    history = cursor.fetchall()
+    cursor.close()
+
+    return jsonify({
+        "subscription": sub,
+        "history": [dict(h) for h in history]
+    })
 
 # ==================== MEMBERS ====================
 @app.route('/members-page')

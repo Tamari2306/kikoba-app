@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Subscription Expired - Kikoba App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { background: linear-gradient(135deg,#198754 0%,#0d6efd 100%); min-height:100vh; display:flex; align-items:center; }
+        .card { border:none; border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.2); }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col-md-6 col-lg-5">
+            <div class="card text-center">
+                <div class="card-body p-5">
+                    <i class="fas fa-lock fa-4x text-danger mb-4"></i>
+                    <h3 class="fw-bold text-danger mb-3">Subscription Expired</h3>
+                    <p class="text-muted mb-4">
+                        {{ message or "Your group's subscription has expired. Please contact your Kikoba administrator to renew access." }}
+                    </p>
+                    <div class="alert alert-info text-start">
+                        <strong><i class="fas fa-info-circle me-1"></i> How to renew:</strong>
+                        <ol class="mb-0 mt-2">
+                            <li>Contact your Kikoba admin</li>
+                            <li>Admin pays the monthly subscription</li>
+                            <li>Access is restored immediately after payment confirmation</li>
+                        </ol>
+                    </div>
+                    <a href="/login" class="btn btn-primary fw-bold mt-3">
+                        <i class="fas fa-sign-in-alt me-1"></i> Back to Login
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>
