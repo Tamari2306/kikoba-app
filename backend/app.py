@@ -24,24 +24,6 @@ import psycopg2.extras
 from config import Config
 import calendar
 
-# Optional dependencies used during application initialization.
-try:
-    from flask_mail import Mail, Message
-    MAIL_AVAILABLE = True
-except ImportError:
-    MAIL_AVAILABLE = False
-    Mail = None
-    Message = None
-
-try:
-    from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-    TOKENS_AVAILABLE = True
-except ImportError:
-    TOKENS_AVAILABLE = False
-    URLSafeTimedSerializer = None
-    SignatureExpired = Exception
-    BadSignature = Exception
-
 
 app = Flask(__name__, static_folder="static")
 app.config.from_object(Config)
@@ -52,15 +34,31 @@ env = os.environ.get('FLASK_ENV', 'development')
 # Initialize CORS
 CORS(app, origins=app.config['CORS_ORIGINS'])
 
+# ── Supabase config ───────────────────────────────────────────────────
+SUPABASE_URL  = os.environ.get("SUPABASE_URL", "")
+SUPABASE_ANON = os.environ.get("SUPABASE_ANON_KEY", "")
+
 # ── Email / Password Reset ────────────────────────────────────────────
 app.config["MAIL_SERVER"]         = os.environ.get("MAIL_SERVER",   "smtp.gmail.com")
 app.config["MAIL_PORT"]           = int(os.environ.get("MAIL_PORT", 587))
 app.config["MAIL_USE_TLS"]        = True
 app.config["MAIL_USERNAME"]       = os.environ.get("MAIL_USERNAME", "")
 app.config["MAIL_PASSWORD"]       = os.environ.get("MAIL_PASSWORD", "")
-app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "tamarsolomon23@gmail.com") #change later for transactional email
-mail = Mail(app) if MAIL_AVAILABLE else None
+app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "noreply@kikoba.app")
+# Mail initialized lazily — only when MAIL_USERNAME is configured
+mail = None
 ts   = URLSafeTimedSerializer(app.config["SECRET_KEY"]) if TOKENS_AVAILABLE else None
+
+def get_mail():
+    """Return mail instance, initializing only if credentials are set."""
+    global mail
+    if not MAIL_AVAILABLE:
+        return None
+    if app.config.get("MAIL_USERNAME"):
+        if mail is None:
+            mail = Mail(app)
+        return mail
+    return None
 
 # Initialize database teardown
 init_db_app(app)
@@ -92,6 +90,18 @@ def get_current_group_id():
 # ==================== ROLE-BASED ACCESS CONTROL ====================
 
 from functools import wraps
+from auth import (
+    get_current_user, get_all_memberships, get_current_group_id as auth_get_group_id,
+    require_auth, require_member as require_any_member_supabase,
+    require_treasurer as require_treasurer_or_above_supabase,
+    require_admin as require_admin_supabase,
+    verify_supabase_jwt
+)
+from notifications import (
+    send_password_reset_email, send_welcome_email,
+    send_sms, send_loan_due_reminder, send_penalty_started_sms,
+    send_subscription_reminder_sms
+)
 try:
     from flask_mail import Mail, Message
     MAIL_AVAILABLE = True
@@ -939,73 +949,6 @@ def signup():
     return render_template("signup.html")
 
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    # Already logged in — redirect appropriately
-    if session.get("user_id") and session.get("group_id"):
-        role = session.get("role")
-        if role in ("admin", "treasurer"):
-            return redirect("/dashboard")
-        return redirect("/member-portal")
-
-    db = get_db()
-    cursor = get_cursor(db)
-    error = None
-
-    if request.method == "POST":
-        group_code = (request.form.get("group_code") or "").strip()
-        phone      = (request.form.get("phone")      or "").strip()
-        password   = request.form.get("password") or ""
-
-        if not group_code or not phone or not password:
-            error = "Group ID, phone number and password are required."
-        else:
-            try:
-                cursor.execute(
-                    """
-                    SELECT *
-                    FROM members
-                    WHERE group_id = %s
-                      AND phone = %s
-                    LIMIT 1
-                    """,
-                    (group_code, phone)
-                )
-                user = cursor.fetchone()
-
-                if user is None:
-                    error = "Invalid Group ID, phone number or password."
-                elif not user["is_active"]:
-                    error = "Your account is inactive. Please contact your Kikoba administrator."
-                elif not user["password"] or not check_password_hash(user["password"], password):
-                    error = "Invalid Group ID, phone number or password."
-                else:
-                    role = (user["role"] or "member").strip().lower()
-                    if role not in ("admin", "treasurer", "member"):
-                        error = "Your account has an invalid role. Please contact your Kikoba administrator."
-                    else:
-                        session.clear()
-                        session["user_id"]     = user["id"]
-                        session["member_id"]   = user["id"]
-                        session["group_id"]    = user["group_id"]
-                        session["role"]        = role
-                        session["member_name"] = user["name"]
-
-                        cursor.close()
-                        if role == "admin":
-                            return redirect("/dashboard")
-                        elif role == "treasurer":
-                            return redirect("/dashboard")
-                        else:
-                            return redirect("/member-portal")
-
-            except Exception as e:
-                print("Login error:", e)
-                error = "An error occurred while trying to log in."
-
-    cursor.close()
-    return render_template("login.html", error=error)
-
 
 @app.route('/api/groups', methods=['POST'])
 @require_admin
@@ -1674,293 +1617,7 @@ def toggle_member_active():
 
 # ==================== PASSWORD RESET ====================
 
-@app.route('/forgot-password', methods=['GET', 'POST'])
-def forgot_password():
-    """Step 1: Member enters their email to request a reset link."""
-    if request.method == 'GET':
-        return render_template('forgot_password.html')
 
-    email = (request.form.get('email') or '').strip()
-    if not email:
-        return render_template('forgot_password.html', error="Email is required.")
-
-    db = get_db()
-    cursor = get_cursor(db)
-    cursor.execute("SELECT id, name, email FROM members WHERE email = %s LIMIT 1", (email,))
-    member = cursor.fetchone()
-    cursor.close()
-
-    # Always show success to prevent email enumeration
-    if member and mail and ts:
-        try:
-            token = ts.dumps(email, salt='password-reset-salt')
-            reset_url = f"{request.host_url.rstrip('/')}reset-password/{token}"
-
-            msg = Message(
-                subject="Kikoba App — Password Reset",
-                recipients=[email]
-            )
-            msg.html = f"""
-            <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:24px;border:1px solid #e9ecef;border-radius:12px;">
-                <div style="text-align:center;margin-bottom:20px;">
-                    <h2 style="color:#198754;">Kikoba App</h2>
-                </div>
-                <p>Hello <strong>{member['name']}</strong>,</p>
-                <p>You requested a password reset. Click the button below to set a new password.
-                   This link expires in <strong>1 hour</strong>.</p>
-                <div style="text-align:center;margin:28px 0;">
-                    <a href="{reset_url}"
-                       style="background:#198754;color:white;padding:12px 28px;border-radius:8px;
-                              text-decoration:none;font-weight:bold;font-size:15px;">
-                        Reset My Password
-                    </a>
-                </div>
-                <p style="color:#6c757d;font-size:13px;">
-                    If you didn't request this, ignore this email — your password won't change.
-                </p>
-            </div>
-            """
-            mail.send(msg)
-        except Exception as e:
-            print("Mail error:", e)
-            # Fail silently — don't reveal mail errors to user
-
-    return render_template('forgot_password.html',
-                           success="If that email is registered, a reset link has been sent.")
-
-
-@app.route('/reset-password/<token>', methods=['GET', 'POST'])
-def reset_password(token):
-    """Step 2: Member clicks link, sets new password."""
-    if not ts:
-        return render_template('reset_password.html',
-                               error="Password reset is not configured. Contact your admin.",
-                               token=None)
-    try:
-        email = ts.loads(token, salt='password-reset-salt', max_age=3600)
-    except SignatureExpired:
-        return render_template('reset_password.html',
-                               error="This reset link has expired. Please request a new one.",
-                               token=None)
-    except BadSignature:
-        return render_template('reset_password.html',
-                               error="Invalid reset link.",
-                               token=None)
-
-    if request.method == 'GET':
-        return render_template('reset_password.html', token=token, error=None)
-
-    password  = (request.form.get('password')  or '').strip()
-    confirm   = (request.form.get('confirm')   or '').strip()
-
-    if not password or len(password) < 6:
-        return render_template('reset_password.html', token=token,
-                               error="Password must be at least 6 characters.")
-    if password != confirm:
-        return render_template('reset_password.html', token=token,
-                               error="Passwords do not match.")
-
-    db = get_db()
-    cursor = get_cursor(db)
-    cursor.execute(
-        "UPDATE members SET password = %s WHERE email = %s",
-        (generate_password_hash(password), email)
-    )
-    db.commit()
-    cursor.close()
-
-    return render_template('reset_password.html', token=None,
-                           success="Password updated! You can now log in.")
-
-@app.route('/logout', methods=['GET', 'POST'])
-def logout():
-    """Logs out any session type."""
-    session.clear()
-    return redirect("/login")
-
-
-
-# ==================== SUBSCRIPTION SYSTEM ====================
-
-RATE_PER_MEMBER = 1000  # TZS per member per month
-GRACE_DAYS      = 7
-
-
-def get_group_subscription_status(db, group_id):
-    """
-    Returns dict with:
-      status: 'active' | 'free' | 'grace' | 'suspended'
-      days_remaining: int (negative if expired)
-      grace_until: date or None
-      is_free: bool
-    """
-    cursor = get_cursor(db)
-    cursor.execute(
-        """SELECT subscription_status, subscription_expires,
-                  grace_until, is_free
-           FROM groups WHERE id = %s""",
-        (group_id,)
-    )
-    row = cursor.fetchone()
-    cursor.close()
-
-    if not row:
-        return {"status": "active", "is_free": False, "days_remaining": 0}
-
-    is_free   = bool(row["is_free"])
-    status    = row["subscription_status"] or "active"
-    expires   = row["subscription_expires"]
-    grace_end = row["grace_until"]
-    today     = date.today()
-
-    if is_free or status == "free":
-        return {"status": "free", "is_free": True, "days_remaining": 999,
-                "grace_until": None}
-
-    if expires is None:
-        return {"status": "active", "is_free": False, "days_remaining": 999,
-                "grace_until": None}
-
-    if isinstance(expires, str):
-        expires = datetime.strptime(expires, "%Y-%m-%d").date()
-    if isinstance(grace_end, str):
-        grace_end = datetime.strptime(grace_end, "%Y-%m-%d").date()
-
-    days_remaining = (expires - today).days
-
-    if days_remaining >= 0:
-        return {"status": "active", "is_free": False,
-                "days_remaining": days_remaining, "grace_until": grace_end}
-
-    if grace_end and today <= grace_end:
-        days_grace_left = (grace_end - today).days
-        return {"status": "grace", "is_free": False,
-                "days_remaining": days_grace_left, "grace_until": grace_end}
-
-    return {"status": "suspended", "is_free": False,
-            "days_remaining": days_remaining, "grace_until": grace_end}
-
-
-def generate_monthly_bill(db, group_id):
-    """
-    Generate a subscription record for the current month if one doesn't exist.
-    Called when a new group is created or at month-end by a cron/scheduler.
-    """
-    today        = date.today()
-    period_start = today.replace(day=1)
-    # Last day of month
-    last_day     = calendar.monthrange(today.year, today.month)[1]
-    period_end   = today.replace(day=last_day)
-
-    cursor = get_cursor(db)
-
-    # Check if bill already exists for this period
-    cursor.execute(
-        "SELECT id FROM subscriptions WHERE group_id=%s AND period_start=%s",
-        (group_id, period_start)
-    )
-    if cursor.fetchone():
-        cursor.close()
-        return  # Already billed this month
-
-    # Count non-system members
-    cursor.execute(
-        "SELECT COUNT(*) FROM members WHERE group_id=%s AND is_system=0 AND is_active=1",
-        (group_id,)
-    )
-    member_count = get_single_value(cursor, 0)
-
-    # Check if group is free
-    cursor.execute("SELECT is_free FROM groups WHERE id=%s", (group_id,))
-    grp = cursor.fetchone()
-    is_free = grp and bool(grp["is_free"])
-
-    amount_due = 0 if is_free else member_count * RATE_PER_MEMBER
-    status     = "free" if is_free else "unpaid"
-
-    cursor.execute(
-        """INSERT INTO subscriptions
-           (group_id, period_start, period_end, member_count, amount_due, status)
-           VALUES (%s, %s, %s, %s, %s, %s)
-           ON CONFLICT (group_id, period_start) DO NOTHING""",
-        (group_id, period_start, period_end, member_count, amount_due, status)
-    )
-    db.commit()
-    cursor.close()
-
-
-def check_subscription_access(group_id, role):
-    """
-    Call this at the start of protected routes.
-    Returns (allowed: bool, read_only: bool, message: str)
-    """
-    db = get_db()
-    sub = get_group_subscription_status(db, group_id)
-    status = sub["status"]
-
-    if status in ("active", "free"):
-        return True, False, None
-
-    if status == "grace":
-        msg = (f"⚠️ Subscription expires in {sub['days_remaining']} day(s). "
-               f"Please pay {RATE_PER_MEMBER:,} TZS × members to continue.")
-        return True, False, msg  # Full access but show warning
-
-    if status == "suspended":
-        if role == "admin":
-            return True, True, "🔒 Subscription suspended. Read-only access. Contact support to renew."
-        return False, False, "🔒 Group subscription has expired. Contact your admin."
-
-    return True, False, None
-
-
-@app.before_request
-def enforce_subscription():
-    """
-    Check subscription status before every request.
-    Skip auth routes, static files, and owner routes.
-    """
-    skip_paths = (
-        "/login", "/logout", "/signup", "/forgot-password",
-        "/reset-password", "/member-login", "/static",
-        "/api/subscription", "/owner"
-    )
-    if any(request.path.startswith(p) for p in skip_paths):
-        return None
-
-    group_id = session.get("group_id")
-    role     = session.get("role")
-
-    if not group_id or not role:
-        return None  # Not logged in — let auth decorators handle it
-
-    allowed, read_only, message = check_subscription_access(group_id, role)
-
-    if not allowed:
-        # Member blocked — clear session and show message
-        session.clear()
-        return render_template("subscription_expired.html",
-                               message=message), 403
-
-    if read_only:
-        # Admin suspended — allow GET only
-        if request.method != "GET":
-            if request.is_json or request.path.startswith("/api/"):
-                return jsonify({
-                    "error": "Subscription suspended. Read-only access only.",
-                    "suspended": True
-                }), 403
-        session["subscription_read_only"] = True
-        session["subscription_message"]   = message
-    elif message:
-        # Grace period warning
-        session["subscription_message"] = message
-    else:
-        session.pop("subscription_message",   None)
-        session.pop("subscription_read_only", None)
-
-
-# ── Subscription API (owner use) ─────────────────────────────────────
 
 @app.route('/api/subscription/mark-paid', methods=['POST'])
 def mark_subscription_paid():
@@ -2110,6 +1767,555 @@ def get_subscription_status():
         "subscription": sub,
         "history": [dict(h) for h in history]
     })
+
+
+# ==================== MEMBER TRANSPARENCY PAGES ====================
+
+@app.route('/member-members')
+@require_any_member
+def member_members_page():
+    if session.get('role') in ('admin', 'treasurer'):
+        return redirect('/members-page')
+    return render_template('member_members.html')
+
+@app.route('/member-contributions')
+@require_any_member
+def member_contributions_page():
+    if session.get('role') in ('admin', 'treasurer'):
+        return redirect('/contributions-page')
+    return render_template('member_contributions.html')
+
+@app.route('/member-loans')
+@require_any_member
+def member_loans_page():
+    if session.get('role') in ('admin', 'treasurer'):
+        return redirect('/loans-page')
+    return render_template('member_loans.html')
+
+@app.route('/member-penalties')
+@require_any_member
+def member_penalties_page():
+    if session.get('role') in ('admin', 'treasurer'):
+        return redirect('/penalties-page')
+    return render_template('member_penalties.html')
+
+
+
+# ==================== OWNER DASHBOARD (PLATFORM ADMIN) ====================
+# Protected by OWNER_TOKEN header — only you can access this
+# Access at /owner/dashboard
+
+def require_owner(f):
+    """Decorator: only platform owner can access."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = (
+            request.headers.get("X-Owner-Token") or
+            request.cookies.get("owner-token") or
+            request.args.get("owner_token")
+        )
+        if token != os.environ.get("OWNER_TOKEN", ""):
+            if request.path.startswith("/api/owner"):
+                return jsonify({"error": "Unauthorized"}), 403
+            return render_template("owner_login.html", error=None)
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route('/owner/login', methods=['GET', 'POST'])
+def owner_login():
+    if request.method == 'POST':
+        token = (request.form.get("token") or "").strip()
+        if token == os.environ.get("OWNER_TOKEN", ""):
+            resp = redirect("/owner/dashboard")
+            resp.set_cookie("owner-token", token, httponly=True,
+                            samesite="Lax", max_age=86400 * 7)
+            return resp
+        return render_template("owner_login.html", error="Invalid access token.")
+    return render_template("owner_login.html", error=None)
+
+
+@app.route('/owner/logout')
+def owner_logout():
+    resp = redirect("/owner/login")
+    resp.delete_cookie("owner-token")
+    return resp
+
+
+@app.route('/owner/dashboard')
+@require_owner
+def owner_dashboard():
+    return render_template("owner_dashboard.html")
+
+
+# ── Owner API ─────────────────────────────────────────────────────────
+
+@app.route('/api/owner/stats', methods=['GET'])
+@require_owner
+def owner_stats():
+    """Platform-wide statistics."""
+    db = get_db()
+    cursor = get_cursor(db)
+
+    # Groups summary
+    cursor.execute("""
+        SELECT
+            g.id, g.name, g.created_at,
+            g.subscription_status, g.subscription_expires,
+            g.is_free, g.profits_unlocked,
+            COUNT(m.id) FILTER (WHERE m.is_system = 0) AS member_count,
+            COUNT(m.id) FILTER (WHERE m.is_system = 0 AND m.is_active = 1) AS active_members,
+            (SELECT COALESCE(SUM(amount), 0) FROM contributions WHERE group_id = g.id) AS total_contributions,
+            (SELECT COALESCE(SUM(principal), 0) FROM loans WHERE group_id = g.id) AS total_loans,
+            (SELECT COALESCE(SUM(amount_paid), 0) FROM penalties WHERE group_id = g.id) AS penalties_collected
+        FROM groups g
+        LEFT JOIN members m ON m.group_id = g.id
+        GROUP BY g.id, g.name, g.created_at, g.subscription_status,
+                 g.subscription_expires, g.is_free, g.profits_unlocked
+        ORDER BY g.id
+    """)
+    groups = [dict(r) for r in cursor.fetchall()]
+
+    # Platform totals
+    cursor.execute("SELECT COUNT(*) FROM groups")
+    total_groups = get_single_value(cursor, 0)
+
+    cursor.execute("SELECT COUNT(*) FROM members WHERE is_system = 0")
+    total_members = get_single_value(cursor, 0)
+
+    cursor.execute("SELECT COALESCE(SUM(amount_paid), 0) FROM subscriptions WHERE status = 'paid'")
+    total_subscription_revenue = get_single_value(cursor, 0)
+
+    cursor.execute("""
+        SELECT COALESCE(SUM(amount_due), 0) FROM subscriptions
+        WHERE status = 'unpaid'
+          AND period_end < CURRENT_DATE
+    """)
+    total_outstanding_bills = get_single_value(cursor, 0)
+
+    # Recent subscription records
+    cursor.execute("""
+        SELECT s.*, g.name AS group_name
+        FROM subscriptions s
+        JOIN groups g ON g.id = s.group_id
+        ORDER BY s.created_at DESC
+        LIMIT 20
+    """)
+    recent_bills = [dict(r) for r in cursor.fetchall()]
+
+    cursor.close()
+    return jsonify({
+        "groups": groups,
+        "totals": {
+            "total_groups": total_groups,
+            "total_members": total_members,
+            "total_subscription_revenue": float(total_subscription_revenue),
+            "total_outstanding_bills": float(total_outstanding_bills),
+        },
+        "recent_bills": recent_bills
+    })
+
+
+@app.route('/api/owner/group/<int:group_id>', methods=['GET'])
+@require_owner
+def owner_group_detail(group_id):
+    """Detailed view of one group."""
+    db = get_db()
+    cursor = get_cursor(db)
+
+    cursor.execute("""
+        SELECT g.*, COUNT(m.id) FILTER (WHERE m.is_system=0) AS member_count
+        FROM groups g
+        LEFT JOIN members m ON m.group_id = g.id
+        WHERE g.id = %s
+        GROUP BY g.id
+    """, (group_id,))
+    group = cursor.fetchone()
+    if not group:
+        cursor.close()
+        return jsonify({"error": "Group not found"}), 404
+
+    cursor.execute("""
+        SELECT id, name, phone, email, role, is_active,
+               CASE WHEN password IS NOT NULL THEN true ELSE false END AS has_password
+        FROM members WHERE group_id = %s ORDER BY role, name
+    """, (group_id,))
+    members = [dict(r) for r in cursor.fetchall()]
+
+    cursor.execute("""
+        SELECT * FROM subscriptions WHERE group_id = %s ORDER BY period_start DESC
+    """, (group_id,))
+    bills = [dict(r) for r in cursor.fetchall()]
+
+    cursor.close()
+    return jsonify({"group": dict(group), "members": members, "bills": bills})
+
+
+@app.route('/api/owner/group/<int:group_id>/toggle-free', methods=['POST'])
+@require_owner
+def owner_toggle_free(group_id):
+    """Mark a group as free or paid."""
+    db = get_db()
+    data    = request.get_json()
+    is_free = 1 if data.get("is_free") else 0
+    cursor  = get_cursor(db)
+    try:
+        cursor.execute(
+            """UPDATE groups SET is_free=%s,
+               subscription_status=%s,
+               subscription_expires=CASE WHEN %s=1 THEN '2099-12-31' ELSE subscription_expires END
+               WHERE id=%s""",
+            (is_free, 'free' if is_free else 'active', is_free, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success"})
+    except Exception as e:
+        db.rollback(); cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/group/<int:group_id>/unlock-profits', methods=['POST'])
+@require_owner
+def owner_unlock_profits(group_id):
+    """Unlock the profit distribution page for a group."""
+    db = get_db()
+    data   = request.get_json()
+    unlock = 1 if data.get("unlock", True) else 0
+    cursor = get_cursor(db)
+    try:
+        cursor.execute(
+            "UPDATE groups SET profits_unlocked=%s WHERE id=%s",
+            (unlock, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success",
+                        "message": "Profits " + ("unlocked" if unlock else "locked") + "."})
+    except Exception as e:
+        db.rollback(); cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/group/<int:group_id>/activate', methods=['POST'])
+@require_owner
+def owner_activate_group(group_id):
+    """Manually activate/suspend a group."""
+    db     = get_db()
+    data   = request.get_json()
+    active = data.get("active", True)
+    cursor = get_cursor(db)
+    try:
+        if active:
+            # Extend subscription by 1 month from today
+            new_expiry  = date.today().replace(day=1)
+            import calendar as cal
+            last_day    = cal.monthrange(new_expiry.year, new_expiry.month)[1]
+            new_expiry  = new_expiry.replace(day=last_day)
+            grace_until = new_expiry + timedelta(days=GRACE_DAYS)
+            cursor.execute(
+                """UPDATE groups SET subscription_status='active',
+                   subscription_expires=%s, grace_until=%s WHERE id=%s""",
+                (new_expiry, grace_until, group_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE groups SET subscription_status='suspended' WHERE id=%s",
+                (group_id,)
+            )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success"})
+    except Exception as e:
+        db.rollback(); cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/subscription/mark-paid', methods=['POST'])
+@require_owner
+def owner_mark_paid(group_id=None):
+    """Mark a subscription bill as paid and extend access."""
+    db   = get_db()
+    data = request.get_json()
+    gid  = data.get("group_id")
+    period_start = data.get("period_start")
+    amount_paid  = int(data.get("amount_paid", 0))
+    ref          = data.get("payment_reference", "")
+
+    if not gid or not period_start:
+        return jsonify({"error": "group_id and period_start required"}), 400
+
+    cursor = get_cursor(db)
+    try:
+        cursor.execute(
+            """UPDATE subscriptions SET amount_paid=%s, status='paid',
+               payment_reference=%s, paid_at=NOW()
+               WHERE group_id=%s AND period_start=%s""",
+            (amount_paid, ref, gid, period_start)
+        )
+        # Extend group access
+        cursor.execute(
+            "SELECT period_end FROM subscriptions WHERE group_id=%s AND period_start=%s",
+            (gid, period_start)
+        )
+        row = cursor.fetchone()
+        if row:
+            pend = row["period_end"]
+            if isinstance(pend, str):
+                pend = datetime.strptime(pend, "%Y-%m-%d").date()
+            grace = pend + timedelta(days=GRACE_DAYS)
+            cursor.execute(
+                """UPDATE groups SET subscription_status='active',
+                   subscription_expires=%s, grace_until=%s WHERE id=%s""",
+                (pend, grace, gid)
+            )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success", "message": "Payment recorded and access extended."})
+    except Exception as e:
+        db.rollback(); cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/subscription/generate-bills', methods=['POST'])
+@require_owner
+def owner_generate_bills():
+    """Generate month-end bills for all non-free groups."""
+    db = get_db()
+    cursor = get_cursor(db)
+    cursor.execute("SELECT id FROM groups")
+    gids = [r["id"] for r in cursor.fetchall()]
+    cursor.close()
+    for gid in gids:
+        generate_monthly_bill(db, gid)
+    return jsonify({"status": "success", "message": f"Bills generated for {len(gids)} groups."})
+
+# ==================== SUPABASE AUTH ROUTES ====================
+
+@app.route('/api/auth/memberships', methods=['GET'])
+def get_memberships():
+    """Return all group memberships for the authenticated user."""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Not authenticated"}), 401
+    memberships = get_all_memberships(user["auth_user_id"])
+    return jsonify({"memberships": memberships, "user": {
+        "auth_user_id": user["auth_user_id"],
+        "email": user.get("email", ""),
+        "phone": user.get("phone", "")
+    }})
+
+
+@app.route('/api/auth/me', methods=['GET'])
+def get_me():
+    """Return current user + group context."""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Not authenticated"}), 401
+    return jsonify(user)
+
+
+@app.route('/api/auth/switch-group', methods=['POST'])
+def switch_group():
+    """Switch active group for a user with multiple memberships."""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    data     = request.get_json()
+    group_id = data.get("group_id")
+    if not group_id:
+        return jsonify({"error": "group_id required"}), 400
+
+    db = get_db()
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, role, is_active FROM members WHERE user_id = %s AND group_id = %s",
+        (user["auth_user_id"], group_id)
+    )
+    membership = cursor.fetchone()
+    cursor.close()
+
+    if not membership:
+        return jsonify({"error": "You are not a member of this group"}), 403
+    if not membership["is_active"]:
+        return jsonify({"error": "Your membership in this group is inactive"}), 403
+
+    return jsonify({"status": "success", "group_id": group_id, "role": membership["role"]})
+
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    """Password reset via Supabase Auth + Brevo email."""
+    if request.method == 'GET':
+        return render_template('forgot_password.html')
+
+    email = (request.form.get('email') or '').strip()
+    if not email:
+        return render_template('forgot_password.html', error="Email is required.")
+
+    # Use Supabase Auth password reset (sends email via Supabase)
+    # We also send our branded Brevo email
+    import requests as req
+    try:
+        # Trigger Supabase password reset
+        res = req.post(
+            f"{SUPABASE_URL}/auth/v1/recover",
+            headers={
+                "apikey": SUPABASE_ANON,
+                "Content-Type": "application/json"
+            },
+            json={"email": email},
+            timeout=10
+        )
+
+        # Also send branded Brevo email if we have the user's name
+        db = get_db()
+        cursor = get_cursor(db)
+        cursor.execute("SELECT name FROM members WHERE email = %s LIMIT 1", (email,))
+        member = cursor.fetchone()
+        cursor.close()
+
+        if member:
+            reset_url = f"{request.host_url.rstrip('/')}reset-password"
+            send_password_reset_email(email, member["name"], reset_url)
+    except Exception as e:
+        print(f"Password reset error: {e}")
+
+    # Always show success (don't reveal if email exists)
+    return render_template('forgot_password.html',
+                           success="If that email is registered, a reset link has been sent.")
+
+
+@app.route('/reset-password', methods=['GET'])
+def reset_password_page():
+    """Supabase handles the actual reset via its redirect URL."""
+    return render_template('reset_password.html', token=None, error=None)
+
+
+@app.route('/login')
+def login_page():
+    """Serve the Supabase Auth login page."""
+    return render_template('login.html',
+                           supabase_url=SUPABASE_URL,
+                           supabase_anon=SUPABASE_ANON)
+
+
+@app.route('/logout')
+def logout():
+    """Clear server-side session. Client clears Supabase session via JS."""
+    session.clear()
+    resp = redirect('/login')
+    resp.delete_cookie('sb-access-token')
+    resp.delete_cookie('sb-refresh-token')
+    resp.delete_cookie('sb-group-id')
+    return resp
+
+
+# ==================== SMS REMINDERS ====================
+
+@app.route('/api/reminders/loan-due', methods=['POST'])
+def send_loan_due_reminders():
+    """
+    Send SMS reminders for loans due in 1 or 3 days.
+    Call this daily via a cron job or scheduler.
+    Owner-token protected.
+    """
+    owner_token = request.headers.get("X-Owner-Token", "")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    db       = get_db()
+    cursor   = get_cursor(db)
+    today    = date.today()
+    sent     = 0
+    errors   = 0
+
+    # Find all active loans with monthly due dates in 1 or 3 days
+    cursor.execute("""
+        SELECT l.id, l.member_id, l.principal, l.months, l.due_date,
+               m.name AS member_name, m.phone,
+               g.name AS group_name, l.group_id
+        FROM loans l
+        JOIN members m ON m.id = l.member_id
+        JOIN groups g ON g.id = l.group_id
+        WHERE l.status IN ('Active', 'Overdue')
+          AND m.phone IS NOT NULL
+    """)
+    loans = cursor.fetchall()
+
+    import calendar as cal
+    for loan in loans:
+        monthly = float(loan['principal']) / int(loan['months'])
+        final_due = datetime.strptime(loan['due_date'], "%Y-%m-%d").date()
+        months = int(loan['months'])
+
+        # Check each monthly due date
+        base_month = final_due.month - months
+        base_year  = final_due.year
+        if base_month <= 0:
+            base_month += 12
+            base_year  -= 1
+
+        for mn in range(1, months + 1):
+            dm, dy = base_month + mn, base_year
+            if dm > 12: dm -= 12; dy += 1
+            due = date(dy, dm, min(final_due.day, cal.monthrange(dy, dm)[1]))
+
+            days_until = (due - today).days
+            if days_until in (1, 3):
+                ok = send_loan_due_reminder(
+                    phone=loan['phone'],
+                    member_name=loan['member_name'],
+                    group_name=loan['group_name'],
+                    days_until_due=days_until,
+                    monthly_amount=monthly,
+                    due_date=due
+                )
+                if ok: sent += 1
+                else:  errors += 1
+
+    cursor.close()
+    return jsonify({"status": "success", "sent": sent, "errors": errors})
+
+
+@app.route('/api/reminders/subscription-due', methods=['POST'])
+def send_subscription_due_reminders():
+    """Send SMS to admins 3 days before subscription expires."""
+    owner_token = request.headers.get("X-Owner-Token", "")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    db     = get_db()
+    cursor = get_cursor(db)
+    today  = date.today()
+    warn   = today + timedelta(days=3)
+    sent   = 0
+
+    cursor.execute("""
+        SELECT g.id, g.name, g.subscription_expires,
+               m.name AS admin_name, m.phone, m.group_id,
+               (SELECT COUNT(*) FROM members WHERE group_id=g.id AND is_system=0) AS member_count
+        FROM groups g
+        JOIN members m ON m.group_id = g.id AND m.role = 'admin'
+        WHERE g.is_free = 0
+          AND g.subscription_expires = %s
+          AND m.phone IS NOT NULL
+    """, (warn,))
+
+    for row in cursor.fetchall():
+        amount_due = int(row['member_count']) * 1000
+        ok = send_subscription_reminder_sms(
+            phone=row['phone'],
+            admin_name=row['admin_name'],
+            group_name=row['name'],
+            amount_due=amount_due,
+            due_date=row['subscription_expires']
+        )
+        if ok: sent += 1
+
+    cursor.close()
+    return jsonify({"status": "success", "sent": sent})
 
 # ==================== MEMBERS ====================
 @app.route('/members-page')
@@ -2294,7 +2500,7 @@ def get_member_details(member_id):
     })
 
 @app.route('/api/members', methods=['GET'])
-@require_treasurer_or_above
+@require_any_member
 def get_members():
     db = get_db()
     group_id = get_current_group_id()
@@ -2492,7 +2698,7 @@ def contributions_page():
 
 
 @app.route('/api/contributions', methods=['GET'])
-@require_treasurer_or_above
+@require_any_member
 def get_contributions():
     db = get_db()
     group_id = get_current_group_id()
@@ -2653,7 +2859,7 @@ def loans_page():
 
 
 @app.route('/api/loans', methods=['GET'])
-@require_treasurer_or_above
+@require_any_member
 def get_loans():
     db = get_db()
     group_id = get_current_group_id()
@@ -3421,7 +3627,7 @@ def penalties_page():
 
 
 @app.route('/api/penalties', methods=['GET'])
-@require_treasurer_or_above
+@require_any_member
 def get_penalties():
     db = get_db()
     group_id = get_current_group_id()
@@ -3837,6 +4043,18 @@ def download_penalties_pdf():
 @app.route('/profits-page')
 @require_admin
 def profits_page():
+    db       = get_db()
+    group_id = get_current_group_id()
+    cursor   = get_cursor(db)
+    cursor.execute(
+        "SELECT profits_unlocked FROM groups WHERE id = %s",
+        (group_id,)
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    unlocked = row and row.get('profits_unlocked')
+    if not unlocked:
+        return render_template('profits_locked.html')
     return render_template('profits.html')
 
 @app.route('/api/profits', methods=['POST'])

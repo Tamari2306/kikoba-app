@@ -1,0 +1,40 @@
+{% extends "member_base.html" %}
+{% block content %}
+<h4 class="fw-bold mb-4"><i class="fas fa-users me-2 text-success"></i>Group Members</h4>
+<div class="card border-0 shadow-sm">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-success">
+                    <tr><th>#</th><th>Name</th><th>Phone</th><th>Joined</th><th>Role</th>
+                        <th class="text-end">Savings</th><th class="text-end">HISA Units</th></tr>
+                </thead>
+                <tbody id="membersTable">
+                    <tr><td colspan="7" class="text-center text-muted py-3">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<script>
+function fc(n){const v=parseFloat(n);return isNaN(v)?'0 TZS':v.toLocaleString('en-TZ',{maximumFractionDigits:0})+' TZS';}
+async function load(){
+    const res = await fetch('/api/members');
+    if(!res.ok) return;
+    const members = await res.json();
+    const roleColor = {admin:'danger',treasurer:'warning',member:'secondary'};
+    document.getElementById('membersTable').innerHTML = members.length
+        ? members.map((m,i)=>`<tr>
+            <td>${i+1}</td>
+            <td class="fw-bold">${m.name}</td>
+            <td>${m.phone||'—'}</td>
+            <td>${m.joined_date||'—'}</td>
+            <td><span class="badge bg-${roleColor[m.role]||'secondary'}">${(m.role||'member').charAt(0).toUpperCase()+(m.role||'member').slice(1)}</span></td>
+            <td class="text-end text-success">${fc(m.total_contributions)}</td>
+            <td class="text-end text-primary">${(parseFloat(m.hisa_units)||0).toFixed(2)}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="7" class="text-center text-muted">No members</td></tr>';
+}
+document.addEventListener('DOMContentLoaded',load);
+</script>
+{% endblock %}

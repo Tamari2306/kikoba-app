@@ -7,64 +7,92 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        body { background: linear-gradient(135deg, #198754 0%, #0d6efd 100%); min-height: 100vh; display: flex; align-items: center; }
-        .card { border: none; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.2); }
-        .card-header { background: linear-gradient(135deg, #198754 0%, #0d6efd 100%); border-radius: 16px 16px 0 0 !important; }
-        .btn-primary { background: #198754; border-color: #198754; }
-        .btn-primary:hover { background: #157347; border-color: #157347; }
-        .toggle-pw { cursor: pointer; background: none; border: 1px solid #ced4da; border-left: none; color: #6c757d; }
+        body { background:linear-gradient(135deg,#198754 0%,#0d6efd 100%); min-height:100vh; display:flex; align-items:center; }
+        .card { border:none; border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,0.2); }
+        .card-header { background:linear-gradient(135deg,#198754,#0d6efd); border-radius:16px 16px 0 0 !important; }
+        .btn-primary { background:#198754; border-color:#198754; }
+        .btn-primary:hover { background:#157347; border-color:#157347; }
+        .toggle-pw { border:1px solid #ced4da; border-left:none; background:white; color:#6c757d; }
+        .spinner-border { width:1.2rem; height:1.2rem; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="row justify-content-center">
         <div class="col-md-5 col-lg-4">
-            <div class="card">
+            <!-- Group selection (shown after login if multiple groups) -->
+            <div id="groupPickerCard" class="card d-none mb-3">
+                <div class="card-header text-center py-3">
+                    <h5 class="text-white fw-bold mb-0">
+                        <i class="fas fa-users me-2"></i>Select Your Kikoba
+                    </h5>
+                </div>
+                <div class="card-body p-3" id="groupList"></div>
+            </div>
+
+            <!-- Main login card -->
+            <div class="card" id="loginCard">
                 <div class="card-header text-center py-4">
                     <i class="fas fa-leaf fa-2x text-white mb-2"></i>
                     <h4 class="text-white fw-bold mb-0">Kikoba App</h4>
-                    <small class="text-white opacity-75">Sign in to your group</small>
+                    <small class="text-white opacity-75">Sign in to your account</small>
                 </div>
                 <div class="card-body p-4">
-                    {% if error %}
-                    <div class="alert alert-danger py-2">
-                        <i class="fas fa-exclamation-circle me-1"></i> {{ error }}
+                    <div id="errorAlert" class="alert alert-danger py-2 d-none"></div>
+                    <div id="successAlert" class="alert alert-success py-2 d-none"></div>
+
+                    <!-- Login method toggle -->
+                    <div class="btn-group w-100 mb-4" role="group">
+                        <button type="button" class="btn btn-outline-success active" id="btnPhone"
+                                onclick="switchMethod('phone')">
+                            <i class="fas fa-phone me-1"></i> Phone
+                        </button>
+                        <button type="button" class="btn btn-outline-success" id="btnEmail"
+                                onclick="switchMethod('email')">
+                            <i class="fas fa-envelope me-1"></i> Email
+                        </button>
                     </div>
-                    {% endif %}
-                    <form method="POST" action="/login">
-                        <div class="mb-3">
-                            <label class="form-label fw-bold">Group ID <span class="text-danger">*</span></label>
-                            <input type="number" name="group_code" class="form-control"
-                                   placeholder="Enter your Group ID" required autofocus>
-                            <small class="text-muted">Given to you when the Kikoba was created.</small>
+
+                    <form id="loginForm" onsubmit="handleLogin(event)">
+                        <!-- Phone input -->
+                        <div class="mb-3" id="phoneGroup">
+                            <label class="form-label fw-bold">Phone Number</label>
+                            <input type="tel" id="phone" class="form-control"
+                                   placeholder="e.g. +255712345678">
+                            <small class="text-muted">Include country code (+255)</small>
                         </div>
-                        <div class="mb-3">
-                            <label class="form-label fw-bold">Phone Number <span class="text-danger">*</span></label>
-                            <input type="text" name="phone" class="form-control"
-                                   placeholder="e.g. 0712345678" required>
+                        <!-- Email input -->
+                        <div class="mb-3 d-none" id="emailGroup">
+                            <label class="form-label fw-bold">Email Address</label>
+                            <input type="email" id="email" class="form-control"
+                                   placeholder="your@email.com">
                         </div>
-                        <div class="mb-3">
-                            <label class="form-label fw-bold">Password <span class="text-danger">*</span></label>
+                        <!-- Password -->
+                        <div class="mb-4">
+                            <label class="form-label fw-bold">Password</label>
                             <div class="input-group">
-                                <input type="password" name="password" id="pw" class="form-control"
+                                <input type="password" id="password" class="form-control"
                                        placeholder="Your password" required>
-                                <button class="toggle-pw btn" type="button" onclick="togglePw('pw','eyePw')">
-                                    <i class="fas fa-eye" id="eyePw"></i>
+                                <button class="toggle-pw btn" type="button"
+                                        onclick="togglePw('password','eyeIcon')">
+                                    <i class="fas fa-eye" id="eyeIcon"></i>
                                 </button>
                             </div>
                         </div>
                         <div class="text-end mb-3">
-                            <a href="/forgot-password" class="text-decoration-none small" style="color:#198754">
-                                Forgot password?
-                            </a>
+                            <a href="/forgot-password" class="text-decoration-none small"
+                               style="color:#198754">Forgot password?</a>
                         </div>
-                        <button type="submit" class="btn btn-primary w-100 fw-bold btn-lg">
+                        <button type="submit" class="btn btn-primary w-100 fw-bold btn-lg" id="loginBtn">
                             <i class="fas fa-sign-in-alt me-1"></i> Login
                         </button>
                     </form>
+
                     <div class="text-center mt-3">
                         <small class="text-muted">New admin?
-                            <a href="/signup" class="text-decoration-none" style="color:#198754">Create account →</a>
+                            <a href="/signup" class="text-decoration-none" style="color:#198754">
+                                Create account →
+                            </a>
                         </small>
                     </div>
                 </div>
@@ -72,18 +100,158 @@
         </div>
     </div>
 </div>
+
+<!-- Supabase JS SDK -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+// ── Config (injected from Flask) ──────────────────────────────────────
+const SUPABASE_URL  = "{{ supabase_url }}";
+const SUPABASE_ANON = "{{ supabase_anon }}";
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+let loginMethod = 'phone';
+
+function switchMethod(method) {
+    loginMethod = method;
+    document.getElementById('phoneGroup').classList.toggle('d-none', method !== 'phone');
+    document.getElementById('emailGroup').classList.toggle('d-none', method !== 'email');
+    document.getElementById('btnPhone').classList.toggle('active', method === 'phone');
+    document.getElementById('btnEmail').classList.toggle('active', method === 'email');
+}
+
 function togglePw(inputId, iconId) {
     const input = document.getElementById(inputId);
     const icon  = document.getElementById(iconId);
-    if (input.type === 'password') {
-        input.type = 'text';
-        icon.classList.replace('fa-eye', 'fa-eye-slash');
+    input.type  = input.type === 'password' ? 'text' : 'password';
+    icon.classList.toggle('fa-eye');
+    icon.classList.toggle('fa-eye-slash');
+}
+
+function showError(msg) {
+    const el = document.getElementById('errorAlert');
+    el.textContent = msg;
+    el.classList.remove('d-none');
+    document.getElementById('successAlert').classList.add('d-none');
+}
+
+function showSuccess(msg) {
+    const el = document.getElementById('successAlert');
+    el.textContent = msg;
+    el.classList.remove('d-none');
+    document.getElementById('errorAlert').classList.add('d-none');
+}
+
+function setLoading(loading) {
+    const btn = document.getElementById('loginBtn');
+    btn.disabled = loading;
+    btn.innerHTML = loading
+        ? '<span class="spinner-border me-2"></span>Signing in...'
+        : '<i class="fas fa-sign-in-alt me-1"></i> Login';
+}
+
+async function handleLogin(e) {
+    e.preventDefault();
+    const password = document.getElementById('password').value;
+    if (!password) return showError('Password is required.');
+
+    setLoading(true);
+    document.getElementById('errorAlert').classList.add('d-none');
+
+    let result;
+    if (loginMethod === 'phone') {
+        const phone = document.getElementById('phone').value.trim();
+        if (!phone) { setLoading(false); return showError('Phone number is required.'); }
+        result = await sb.auth.signInWithPassword({ phone, password });
     } else {
-        input.type = 'password';
-        icon.classList.replace('fa-eye-slash', 'fa-eye');
+        const email = document.getElementById('email').value.trim();
+        if (!email) { setLoading(false); return showError('Email is required.'); }
+        result = await sb.auth.signInWithPassword({ email, password });
+    }
+
+    if (result.error) {
+        setLoading(false);
+        return showError(result.error.message || 'Login failed. Check your credentials.');
+    }
+
+    // Login successful — store session
+    const session = result.data.session;
+    const token   = session.access_token;
+
+    // Store token in cookie for server-rendered pages
+    document.cookie = `sb-access-token=${token}; path=/; SameSite=Lax`;
+    document.cookie = `sb-refresh-token=${session.refresh_token}; path=/; SameSite=Lax`;
+
+    // Ask backend which groups this user belongs to
+    const res = await fetch('/api/auth/memberships', {
+        headers: { 'Authorization': `Bearer ${token}` }
+    });
+    const data = await res.json();
+
+    if (!data.memberships || data.memberships.length === 0) {
+        setLoading(false);
+        return showError('No Kikoba membership found for this account. Contact your admin.');
+    }
+
+    if (data.memberships.length === 1) {
+        // Only one group — go straight in
+        const m = data.memberships[0];
+        document.cookie = `sb-group-id=${m.group_id}; path=/; SameSite=Lax`;
+        redirectByRole(m.role);
+    } else {
+        // Multiple groups — show picker
+        setLoading(false);
+        showGroupPicker(data.memberships, token);
     }
 }
+
+function showGroupPicker(memberships, token) {
+    document.getElementById('loginCard').classList.add('d-none');
+    const picker = document.getElementById('groupPickerCard');
+    const list   = document.getElementById('groupList');
+    picker.classList.remove('d-none');
+
+    list.innerHTML = '<p class="text-muted small mb-3">You belong to multiple Vikoba. Choose one:</p>' +
+        memberships.map(m => `
+            <button class="btn btn-outline-success w-100 mb-2 text-start"
+                    onclick="selectGroup(${m.group_id}, '${m.role}')">
+                <i class="fas fa-users me-2"></i>
+                <strong>${m.group_name}</strong>
+                <span class="badge bg-${m.role==='admin'?'danger':m.role==='treasurer'?'warning':'secondary'} ms-2">
+                    ${m.role}
+                </span>
+            </button>
+        `).join('');
+}
+
+function selectGroup(groupId, role) {
+    document.cookie = `sb-group-id=${groupId}; path=/; SameSite=Lax`;
+    redirectByRole(role);
+}
+
+function redirectByRole(role) {
+    if (role === 'admin' || role === 'treasurer') {
+        window.location.href = '/dashboard';
+    } else {
+        window.location.href = '/member-portal';
+    }
+}
+
+// Auto-redirect if already logged in
+(async () => {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) {
+        const res = await fetch('/api/auth/memberships', {
+            headers: { 'Authorization': `Bearer ${session.access_token}` }
+        });
+        const data = await res.json();
+        if (data.memberships && data.memberships.length > 0) {
+            const m = data.memberships[0];
+            document.cookie = `sb-group-id=${m.group_id}; path=/; SameSite=Lax`;
+            redirectByRole(m.role);
+        }
+    }
+})();
 </script>
 </body>
 </html>
