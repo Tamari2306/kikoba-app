@@ -24,12 +24,10 @@ SUPABASE_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")  # Settings → API 
 
 
 def verify_supabase_jwt(token: str) -> Optional[dict]:
-    """
-    Verify a Supabase JWT and return the decoded payload.
-    Returns None if invalid or expired.
-    """
     if not SUPABASE_SECRET:
+        print("❌ SUPABASE_JWT_SECRET is missing")
         return None
+
     try:
         payload = pyjwt.decode(
             token,
@@ -37,10 +35,23 @@ def verify_supabase_jwt(token: str) -> Optional[dict]:
             algorithms=["HS256"],
             options={"verify_aud": False}
         )
+
+        print("✅ Supabase JWT verified")
+        print("JWT user ID:", payload.get("sub"))
+        print("JWT email:", payload.get("email"))
+
         return payload
+
     except pyjwt.ExpiredSignatureError:
+        print("❌ Supabase JWT expired")
         return None
-    except pyjwt.InvalidTokenError:
+
+    except pyjwt.InvalidTokenError as e:
+        print(f"❌ Supabase JWT invalid: {e}")
+        return None
+
+    except Exception as e:
+        print(f"❌ JWT verification error: {e}")
         return None
 
 
