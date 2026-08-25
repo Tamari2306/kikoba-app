@@ -69,8 +69,9 @@ def close_db(e=None):
             connection_pool.putconn(db)
 
 def get_cursor(db):
-    return db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
+    return db.cursor(
+        cursor_factory=psycopg2.extras.RealDictCursor
+    )
 
 def init_app(app):
     """
