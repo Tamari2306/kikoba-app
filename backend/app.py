@@ -47,6 +47,7 @@ app.config["MAIL_PASSWORD"]       = os.environ.get("MAIL_PASSWORD", "")
 app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "noreply@kikoba.app")
 # Mail initialized lazily — only when MAIL_USERNAME is configured
 mail = None
+ts = None
 
 def get_mail():
     """Return mail instance, initializing only if credentials are set."""
@@ -84,6 +85,135 @@ def get_cursor(db):
 def get_current_group_id():
     """Extract group_id from session, default to None"""
     return session.get("group_id")
+
+# ==================== SUBSCRIPTION CONSTANTS & HELPERS ====================
+
+RATE_PER_MEMBER = 1000  # TZS per member per month
+GRACE_DAYS      = 7
+
+
+def get_group_subscription_status(db, group_id):
+    """
+    Returns dict: status (active|free|grace|suspended), days_remaining, is_free
+    """
+    cursor = get_cursor(db)
+    cursor.execute(
+        """SELECT subscription_status, subscription_expires,
+                  grace_until, is_free
+           FROM groups WHERE id = %s""",
+        (group_id,)
+    )
+    row = cursor.fetchone()
+    cursor.close()
+
+    if not row:
+        return {"status": "active", "is_free": False, "days_remaining": 999}
+
+    is_free   = bool(row.get("is_free", 0))
+    status    = row.get("subscription_status") or "active"
+    expires   = row.get("subscription_expires")
+    grace_end = row.get("grace_until")
+    today     = date.today()
+
+    if is_free or status == "free":
+        return {"status": "free", "is_free": True, "days_remaining": 999,
+                "grace_until": None}
+
+    if expires is None:
+        return {"status": "active", "is_free": False, "days_remaining": 999,
+                "grace_until": None}
+
+    if isinstance(expires, str):
+        expires = datetime.strptime(expires[:10], "%Y-%m-%d").date()
+    if isinstance(grace_end, str):
+        grace_end = datetime.strptime(grace_end[:10], "%Y-%m-%d").date()
+
+    days_remaining = (expires - today).days
+
+    if days_remaining >= 0:
+        return {"status": "active", "is_free": False,
+                "days_remaining": days_remaining, "grace_until": grace_end}
+
+    if grace_end and today <= grace_end:
+        return {"status": "grace", "is_free": False,
+                "days_remaining": (grace_end - today).days,
+                "grace_until": grace_end}
+
+    return {"status": "suspended", "is_free": False,
+            "days_remaining": days_remaining, "grace_until": grace_end}
+
+
+def generate_monthly_bill(db, group_id):
+    """Generate a subscription record for the current month if one doesn't exist."""
+    today        = date.today()
+    period_start = today.replace(day=1)
+    import calendar as _cal
+    last_day   = _cal.monthrange(today.year, today.month)[1]
+    period_end = today.replace(day=last_day)
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id FROM subscriptions WHERE group_id=%s AND period_start=%s",
+        (group_id, period_start)
+    )
+    if cursor.fetchone():
+        cursor.close()
+        return
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM members WHERE group_id=%s AND is_system=0 AND is_active=1",
+        (group_id,)
+    )
+    member_count = get_single_value(cursor, 0)
+
+    cursor.execute("SELECT COALESCE(is_free,0) FROM groups WHERE id=%s", (group_id,))
+    row = cursor.fetchone()
+    is_free = bool(list(row.values())[0]) if row else False
+
+    amount_due = 0 if is_free else int(member_count) * RATE_PER_MEMBER
+    status     = "free" if is_free else "unpaid"
+
+    try:
+        cursor.execute(
+            """INSERT INTO subscriptions
+               (group_id, period_start, period_end, member_count, amount_due, status)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT (group_id, period_start) DO NOTHING""",
+            (group_id, period_start, period_end, member_count, amount_due, status)
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"generate_monthly_bill error: {e}")
+    finally:
+        cursor.close()
+
+
+def check_subscription_access(group_id, role, db=None):
+    """
+    Returns (allowed: bool, read_only: bool, message: str|None)
+    """
+    if db is None:
+        db = get_db()
+    sub    = get_group_subscription_status(db, group_id)
+    status = sub["status"]
+
+    if status in ("active", "free"):
+        return True, False, None
+
+    if status == "grace":
+        msg = (f"⚠️ Subscription expires in {sub['days_remaining']} day(s). "
+               f"Please pay to continue uninterrupted access.")
+        return True, False, msg
+
+    if status == "suspended":
+        if role == "admin":
+            return True, True, "🔒 Subscription suspended. Read-only access. Contact support to renew."
+        return False, False, "🔒 Group subscription has expired. Contact your admin."
+
+    return True, False, None
+
+
 
 
 # ==================== ROLE-BASED ACCESS CONTROL ====================
@@ -142,9 +272,6 @@ except ImportError:
     SignatureExpired = Exception
     BadSignature = Exception
     print("WARNING: itsdangerous not installed. Run: pip install itsdangerous")
-
-# Initialize the password-reset serializer after its optional dependency is loaded.
-ts = URLSafeTimedSerializer(app.config["SECRET_KEY"]) if TOKENS_AVAILABLE else None
 
 def get_current_role():
     """Return the role of the currently logged-in user (admin or member)."""
@@ -1827,6 +1954,7 @@ def member_penalties_page():
 
 
 
+
 # ==================== OWNER DASHBOARD (PLATFORM ADMIN) ====================
 # Protected by OWNER_TOKEN header — only you can access this
 # Access at /owner/dashboard
@@ -2212,61 +2340,6 @@ def forgot_password():
     return render_template('forgot_password.html',
                            success="If that email is registered, a reset link has been sent.")
 
-@app.route("/admin/set-supabase-password", methods=["GET", "POST"])
-def set_supabase_password():
-    # Import lazily so the application can start without loading the optional
-    # Supabase client until this admin endpoint is used.
-    import importlib
-
-    try:
-        create_client = importlib.import_module("supabase").create_client
-    except ImportError as exc:
-        raise RuntimeError(
-            "The Supabase client is required for this endpoint. "
-            "Install it with: pip install supabase"
-        ) from exc
-
-    if request.method == "GET":
-        return """
-        <form method="POST">
-            <input name="email" type="email" placeholder="Email" required>
-            <input name="password" type="password" placeholder="New password" required>
-            <button type="submit">Set Password</button>
-        </form>
-        """
-
-    email = request.form.get("email", "").strip()
-    password = request.form.get("password", "")
-
-    if len(password) < 6:
-        return "Password must be at least 6 characters", 400
-
-    supabase_admin = create_client(
-        SUPABASE_URL,
-        os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-    )
-
-    # Find the Supabase Auth user
-    users = supabase_admin.auth.admin.list_users()
-
-    user = next(
-        (u for u in users if u.email.lower() == email.lower()),
-        None
-    )
-
-    if not user:
-        return "Supabase Auth user not found", 404
-
-    # Set the password
-    supabase_admin.auth.admin.update_user_by_id(
-        user.id,
-        {
-            "password": password,
-            "email_confirm": True
-        }
-    )
-
-    return f"Password successfully set for {email}. <a href='/login'>Go to login</a>"
 
 @app.route('/reset-password', methods=['GET'])
 def reset_password_page():

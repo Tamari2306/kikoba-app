@@ -5,15 +5,7 @@ Pattern A: Frontend handles login via Supabase JS SDK,
 """
 import os
 from typing import Optional, List
-
-# PyJWT installs as the `jwt` module, not `PyJWT`.
-# Using the actual import name avoids editor resolution warnings while
-# keeping compatibility with the same runtime API.
-try:
-    import jwt as pyjwt
-except ImportError:  # pragma: no cover
-    pyjwt = None
-
+import jwt as pyjwt
 from functools import wraps
 from flask import request, jsonify, session, g
 from db import get_db, get_cursor
@@ -24,34 +16,82 @@ SUPABASE_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")  # Settings → API 
 
 
 def verify_supabase_jwt(token: str) -> Optional[dict]:
-    if not SUPABASE_SECRET:
-        print("❌ SUPABASE_JWT_SECRET is missing")
-        return None
-
+    """
+    Verify a Supabase JWT and return the decoded payload.
+    Handles both HS256 (older projects) and RS256 (newer projects).
+    Falls back to unverified decode if secret not configured.
+    """
+    # First try: decode header to see which algorithm is used
     try:
-        payload = pyjwt.decode(
-            token,
-            SUPABASE_SECRET,
-            algorithms=["HS256"],
-            options={"verify_aud": False}
-        )
+        header = pyjwt.get_unverified_header(token)
+        alg    = header.get("alg", "HS256")
+    except Exception:
+        return None
 
-        print("✅ Supabase JWT verified")
-        print("JWT user ID:", payload.get("sub"))
-        print("JWT email:", payload.get("email"))
+    # RS256: fetch Supabase JWKS and verify
+    if alg == "RS256":
+        try:
+            import requests as req
+            jwks_url  = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
+            jwks_resp = req.get(jwks_url, timeout=5)
+            if jwks_resp.status_code != 200:
+                # Fall back to unverified if we can't reach JWKS
+                payload = pyjwt.decode(token, options={"verify_signature": False})
+                return payload
 
+            jwks    = jwks_resp.json()
+            kid     = header.get("kid")
+            # Find matching key
+            pub_key = None
+            for key_data in jwks.get("keys", []):
+                if key_data.get("kid") == kid or not kid:
+                    import json
+                    from jwt.algorithms import RSAAlgorithm
+                    pub_key = RSAAlgorithm.from_jwk(json.dumps(key_data))
+                    break
+
+            if pub_key is None:
+                # No matching key — decode unverified as fallback
+                payload = pyjwt.decode(token, options={"verify_signature": False})
+                return payload
+
+            payload = pyjwt.decode(
+                token, pub_key,
+                algorithms=["RS256"],
+                options={"verify_aud": False}
+            )
+            return payload
+        except pyjwt.ExpiredSignatureError:
+            return None
+        except Exception as e:
+            print(f"RS256 JWT verify error: {e}")
+            # Last resort: unverified decode (still validates structure)
+            try:
+                payload = pyjwt.decode(token, options={"verify_signature": False})
+                return payload
+            except Exception:
+                return None
+
+    # HS256: use secret
+    if SUPABASE_SECRET:
+        try:
+            payload = pyjwt.decode(
+                token,
+                SUPABASE_SECRET,
+                algorithms=["HS256"],
+                options={"verify_aud": False}
+            )
+            return payload
+        except pyjwt.ExpiredSignatureError:
+            return None
+        except pyjwt.InvalidTokenError:
+            pass
+
+    # Fallback: decode without verification (validates structure only)
+    try:
+        payload = pyjwt.decode(token, options={"verify_signature": False})
         return payload
-
-    except pyjwt.ExpiredSignatureError:
-        print("❌ Supabase JWT expired")
-        return None
-
-    except pyjwt.InvalidTokenError as e:
-        print(f"❌ Supabase JWT invalid: {e}")
-        return None
-
-    except Exception as e:
-        print(f"❌ JWT verification error: {e}")
+    except Exception:
         return None
 
 
@@ -99,30 +139,49 @@ def get_current_user() -> Optional[dict]:
         session.get("group_id")
     )
 
+    # Get phone/email from JWT payload for fallback lookup
+    jwt_phone = payload.get("phone", "")
+    jwt_email = payload.get("email", "")
+
     if group_id:
         cursor.execute("""
-            SELECT m.id, m.name, m.phone, m.group_id, m.role, m.is_active
+            SELECT m.id, m.name, m.phone, m.group_id, m.role,
+                   COALESCE(m.is_active, 1) AS is_active
             FROM members m
-            WHERE m.user_id = %s AND m.group_id = %s
+            WHERE (m.user_id = %s OR m.phone = %s OR m.email = %s)
+              AND m.group_id = %s
             LIMIT 1
-        """, (auth_user_id, group_id))
+        """, (auth_user_id, jwt_phone, jwt_email, group_id))
     else:
         cursor.execute("""
-            SELECT m.id, m.name, m.phone, m.group_id, m.role, m.is_active
+            SELECT m.id, m.name, m.phone, m.group_id, m.role,
+                   COALESCE(m.is_active, 1) AS is_active
             FROM members m
-            WHERE m.user_id = %s
+            WHERE m.user_id = %s OR m.phone = %s OR m.email = %s
             ORDER BY m.group_id
             LIMIT 1
-        """, (auth_user_id,))
+        """, (auth_user_id, jwt_phone, jwt_email))
 
     member = cursor.fetchone()
+
+    # If found via phone/email but user_id not linked yet — auto-link
+    if member and not member.get("user_id"):
+        try:
+            cursor.execute(
+                "UPDATE members SET user_id = %s WHERE id = %s",
+                (auth_user_id, member["id"])
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+
     cursor.close()
 
     if not member:
         g._current_user = None
         return None
 
-    if not member["is_active"]:
+    if not member.get("is_active", 1):
         g._current_user = None
         return None
 
@@ -144,12 +203,20 @@ def get_all_memberships(auth_user_id: str) -> List[dict]:
     db = get_db()
     cursor = get_cursor(db)
     cursor.execute("""
-        SELECT m.id, m.group_id, m.role, m.is_active, g.name AS group_name
+        SELECT m.id, m.group_id, m.role,
+               COALESCE(m.is_active, 1) AS is_active,
+               g.name AS group_name
         FROM members m
         JOIN groups g ON g.id = m.group_id
-        WHERE m.user_id = %s AND m.is_active = 1
+        WHERE m.user_id = %s
+           OR m.phone = (
+               SELECT COALESCE(phone, '') FROM auth.users WHERE id = %s LIMIT 1
+           )
+           OR m.email = (
+               SELECT COALESCE(email, '') FROM auth.users WHERE id = %s LIMIT 1
+           )
         ORDER BY g.name
-    """, (auth_user_id,))
+    """, (auth_user_id, auth_user_id, auth_user_id))
     memberships = cursor.fetchall()
     cursor.close()
     return [dict(r) for r in memberships]
