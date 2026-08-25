@@ -4,7 +4,16 @@ Pattern A: Frontend handles login via Supabase JS SDK,
            Backend verifies JWT on every API request.
 """
 import os
-import jwt as pyjwt
+from typing import Optional, List
+
+# PyJWT installs as the `jwt` module, not `PyJWT`.
+# Using the actual import name avoids editor resolution warnings while
+# keeping compatibility with the same runtime API.
+try:
+    import jwt as pyjwt
+except ImportError:  # pragma: no cover
+    pyjwt = None
+
 from functools import wraps
 from flask import request, jsonify, session, g
 from db import get_db, get_cursor
@@ -14,7 +23,7 @@ SUPABASE_ANON   = os.environ.get("SUPABASE_ANON_KEY", "")
 SUPABASE_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")  # Settings → API → JWT Secret
 
 
-def verify_supabase_jwt(token: str) -> dict | None:
+def verify_supabase_jwt(token: str) -> Optional[dict]:
     """
     Verify a Supabase JWT and return the decoded payload.
     Returns None if invalid or expired.
@@ -35,7 +44,7 @@ def verify_supabase_jwt(token: str) -> dict | None:
         return None
 
 
-def get_token_from_request() -> str | None:
+def get_token_from_request() -> Optional[str]:
     """Extract JWT from Authorization header or cookie."""
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -44,7 +53,7 @@ def get_token_from_request() -> str | None:
     return request.cookies.get("sb-access-token")
 
 
-def get_current_user() -> dict | None:
+def get_current_user() -> Optional[dict]:
     """
     Verify JWT and return user info cached on g for this request.
     Returns dict with: user_id, email, phone, member_id, group_id, role, member_name
@@ -119,7 +128,7 @@ def get_current_user() -> dict | None:
     return user
 
 
-def get_all_memberships(auth_user_id: str) -> list:
+def get_all_memberships(auth_user_id: str) -> List[dict]:
     """Return all groups this user belongs to (for group switcher)."""
     db = get_db()
     cursor = get_cursor(db)

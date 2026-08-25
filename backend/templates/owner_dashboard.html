@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Owner Dashboard - Kikoba App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body{background:#0d1117;color:#e6edf3;}
+        .navbar{background:#161b22!important;border-bottom:1px solid #30363d;}
+        .card{background:#161b22;border:1px solid #30363d;border-radius:12px;}
+        .card-header{background:#21262d;border-bottom:1px solid #30363d;}
+        .stat-card{background:linear-gradient(135deg,#198754,#157347);border:none;border-radius:12px;}
+        .stat-card.revenue{background:linear-gradient(135deg,#0d6efd,#0a58ca);}
+        .stat-card.outstanding{background:linear-gradient(135deg,#dc3545,#b02a37);}
+        .stat-card.members{background:linear-gradient(135deg,#6f42c1,#59359a);}
+        .table{color:#e6edf3;}
+        .table thead{background:#21262d;}
+        .table tbody tr:hover{background:#21262d;}
+        .badge-free{background:#198754;}
+        .badge-active{background:#0d6efd;}
+        .badge-grace{background:#ffc107;color:#000;}
+        .badge-suspended{background:#dc3545;}
+        .btn-sm{font-size:.75rem;}
+        .group-row{cursor:pointer;}
+        .group-row:hover td{background:#21262d!important;}
+        #groupDetail{display:none;}
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark px-4 py-2">
+    <span class="navbar-brand fw-bold">
+        <i class="fas fa-shield-alt me-2 text-success"></i>Kikoba App — Owner Dashboard
+    </span>
+    <div class="d-flex gap-2">
+        <button class="btn btn-sm btn-outline-success" onclick="generateBills()">
+            <i class="fas fa-file-invoice me-1"></i> Generate Bills
+        </button>
+        <button class="btn btn-sm btn-outline-warning" onclick="sendReminders()">
+            <i class="fas fa-sms me-1"></i> Send Reminders
+        </button>
+        <a href="/owner/logout" class="btn btn-sm btn-outline-danger">
+            <i class="fas fa-sign-out-alt me-1"></i> Logout
+        </a>
+    </div>
+</nav>
+
+<div class="container-fluid px-4 py-4">
+
+    <!-- Platform Stats -->
+    <div class="row g-3 mb-4" id="statsRow">
+        <div class="col-6 col-md-3">
+            <div class="stat-card card p-3 text-white text-center">
+                <div class="small opacity-75 mb-1">Total Groups</div>
+                <div class="fw-bold fs-3" id="totalGroups">—</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="stat-card members card p-3 text-white text-center">
+                <div class="small opacity-75 mb-1">Total Members</div>
+                <div class="fw-bold fs-3" id="totalMembers">—</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="stat-card revenue card p-3 text-white text-center">
+                <div class="small opacity-75 mb-1">Subscription Revenue</div>
+                <div class="fw-bold fs-4" id="totalRevenue">—</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="stat-card outstanding card p-3 text-white text-center">
+                <div class="small opacity-75 mb-1">Outstanding Bills</div>
+                <div class="fw-bold fs-4" id="totalOutstanding">—</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-4">
+
+        <!-- Groups Table -->
+        <div class="col-lg-8">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center py-3">
+                    <h6 class="mb-0 fw-bold"><i class="fas fa-users me-2 text-success"></i>Groups</h6>
+                    <input type="text" class="form-control form-control-sm w-auto" id="groupSearch"
+                           placeholder="Search..." oninput="filterGroups()">
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm mb-0" id="groupsTable">
+                        <thead>
+                            <tr>
+                                <th>ID</th><th>Name</th><th>Members</th>
+                                <th>Contributions</th><th>Status</th>
+                                <th>Expires</th><th>Profits</th><th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="groupsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Bills -->
+        <div class="col-lg-4">
+            <div class="card">
+                <div class="card-header py-3">
+                    <h6 class="mb-0 fw-bold"><i class="fas fa-file-invoice me-2 text-warning"></i>Recent Bills</h6>
+                </div>
+                <div class="card-body p-0" style="max-height:420px;overflow-y:auto;">
+                    <div id="recentBills"></div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Group Detail Panel -->
+    <div class="card mt-4" id="groupDetail">
+        <div class="card-header d-flex justify-content-between py-3">
+            <h6 class="mb-0 fw-bold" id="detailTitle">Group Detail</h6>
+            <button class="btn btn-sm btn-outline-secondary" onclick="closeDetail()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="card-body">
+            <div class="row g-4">
+                <div class="col-md-6">
+                    <h6 class="text-success mb-3">Members</h6>
+                    <div id="detailMembers"></div>
+                </div>
+                <div class="col-md-6">
+                    <h6 class="text-warning mb-3">Billing History</h6>
+                    <div id="detailBills"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Mark Paid Modal -->
+<div class="modal fade" id="markPaidModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content bg-dark border border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title text-white">Mark Subscription Paid</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="mpGroupId">
+                <input type="hidden" id="mpPeriodStart">
+                <div class="mb-3">
+                    <label class="form-label text-white">Amount Paid (TZS)</label>
+                    <input type="number" id="mpAmount" class="form-control bg-dark text-white border-secondary">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label text-white">Payment Reference</label>
+                    <input type="text" id="mpRef" class="form-control bg-dark text-white border-secondary"
+                           placeholder="e.g. M-Pesa ref or bank ref">
+                </div>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button class="btn btn-success fw-bold" onclick="submitMarkPaid()">
+                    <i class="fas fa-check me-1"></i> Confirm Payment
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function fc(n){const v=parseFloat(n);return isNaN(v)?'0':v.toLocaleString('en-TZ',{maximumFractionDigits:0})+' TZS';}
+
+let allGroups = [];
+
+const statusBadge = s => ({
+    free:      '<span class="badge badge-free">Free</span>',
+    active:    '<span class="badge badge-active">Active</span>',
+    grace:     '<span class="badge badge-grace">Grace</span>',
+    suspended: '<span class="badge badge-suspended">Suspended</span>',
+}[s] || '<span class="badge bg-secondary">Unknown</span>');
+
+async function loadStats() {
+    const res  = await fetch('/api/owner/stats');
+    const data = await res.json();
+
+    document.getElementById('totalGroups').textContent     = data.totals.total_groups;
+    document.getElementById('totalMembers').textContent    = data.totals.total_members;
+    document.getElementById('totalRevenue').textContent    = fc(data.totals.total_subscription_revenue);
+    document.getElementById('totalOutstanding').textContent= fc(data.totals.total_outstanding_bills);
+
+    allGroups = data.groups;
+    renderGroups(allGroups);
+    renderRecentBills(data.recent_bills);
+}
+
+function renderGroups(groups) {
+    const tbody = document.getElementById('groupsBody');
+    tbody.innerHTML = groups.map(g => `
+        <tr class="group-row" onclick="loadGroupDetail(${g.id}, '${g.name}')">
+            <td>${g.id}</td>
+            <td class="fw-bold text-white">${g.name}</td>
+            <td>${g.member_count}</td>
+            <td>${fc(g.total_contributions)}</td>
+            <td>${statusBadge(g.subscription_status)}</td>
+            <td>${g.subscription_expires ? g.subscription_expires.substring(0,10) : '—'}</td>
+            <td>
+                <span class="badge ${g.profits_unlocked ? 'bg-success' : 'bg-secondary'}">
+                    ${g.profits_unlocked ? '🔓 Unlocked' : '🔒 Locked'}
+                </span>
+            </td>
+            <td onclick="event.stopPropagation()">
+                <div class="d-flex gap-1 flex-wrap">
+                    <button class="btn btn-sm btn-outline-success"
+                            onclick="toggleFree(${g.id}, ${g.is_free ? 0 : 1})"
+                            title="${g.is_free ? 'Set to paid' : 'Mark as free'}">
+                        ${g.is_free ? '💳 Charge' : '🎁 Free'}
+                    </button>
+                    <button class="btn btn-sm ${g.subscription_status==='suspended'?'btn-outline-success':'btn-outline-warning'}"
+                            onclick="toggleActive(${g.id}, ${g.subscription_status==='suspended' ? 1 : 0})">
+                        ${g.subscription_status==='suspended' ? '✅ Activate' : '⏸ Suspend'}
+                    </button>
+                    <button class="btn btn-sm ${g.profits_unlocked ? 'btn-outline-warning' : 'btn-outline-success'}"
+                            onclick="toggleProfits(${g.id}, ${g.profits_unlocked ? 0 : 1})">
+                        ${g.profits_unlocked ? '🔒 Lock' : '🔓 Unlock'} Profits
+                    </button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function filterGroups() {
+    const q = document.getElementById('groupSearch').value.toLowerCase();
+    renderGroups(allGroups.filter(g => g.name.toLowerCase().includes(q)));
+}
+
+function renderRecentBills(bills) {
+    const el = document.getElementById('recentBills');
+    el.innerHTML = bills.length ? bills.map(b => `
+        <div class="p-3 border-bottom border-secondary">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="fw-bold text-white small">${b.group_name}</div>
+                    <div class="text-muted" style="font-size:0.75rem">
+                        ${b.period_start} → ${b.period_end}
+                    </div>
+                    <div class="text-muted" style="font-size:0.75rem">
+                        Due: ${fc(b.amount_due)} | Paid: ${fc(b.amount_paid)}
+                    </div>
+                    ${b.payment_reference ? `<div class="text-success" style="font-size:0.75rem">Ref: ${b.payment_reference}</div>` : ''}
+                </div>
+                <div class="d-flex flex-column gap-1 align-items-end">
+                    <span class="badge ${b.status==='paid'?'bg-success':b.status==='free'?'bg-info':b.status==='unpaid'?'bg-danger':'bg-secondary'}">
+                        ${b.status}
+                    </span>
+                    ${b.status === 'unpaid' ? `
+                    <button class="btn btn-sm btn-outline-success" style="font-size:0.7rem"
+                            onclick="openMarkPaid(${b.group_id}, '${b.period_start}', ${b.amount_due})">
+                        Mark Paid
+                    </button>` : ''}
+                </div>
+            </div>
+        </div>
+    `).join('') : '<div class="p-3 text-muted text-center">No bills yet</div>';
+}
+
+async function loadGroupDetail(groupId, name) {
+    document.getElementById('groupDetail').style.display = 'block';
+    document.getElementById('detailTitle').textContent = `${name} (ID: ${groupId})`;
+    document.getElementById('detailMembers').innerHTML = '<div class="text-muted">Loading...</div>';
+    document.getElementById('detailBills').innerHTML   = '<div class="text-muted">Loading...</div>';
+
+    const res  = await fetch(`/api/owner/group/${groupId}`);
+    const data = await res.json();
+
+    const roleColor = {admin:'danger',treasurer:'warning',member:'secondary'};
+    document.getElementById('detailMembers').innerHTML = `
+        <div class="table-responsive">
+            <table class="table table-sm text-white">
+                <thead><tr><th>Name</th><th>Phone</th><th>Role</th><th>Active</th><th>Password</th></tr></thead>
+                <tbody>
+                    ${data.members.map(m => `<tr>
+                        <td>${m.name}</td>
+                        <td>${m.phone||'—'}</td>
+                        <td><span class="badge bg-${roleColor[m.role]||'secondary'}">${m.role}</span></td>
+                        <td>${m.is_active ? '✅' : '❌'}</td>
+                        <td>${m.has_password ? '✅' : '❌'}</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>
+        </div>`;
+
+    document.getElementById('detailBills').innerHTML = data.bills.map(b => `
+        <div class="p-2 border-bottom border-secondary d-flex justify-content-between align-items-center">
+            <div>
+                <div class="small text-white">${b.period_start} → ${b.period_end}</div>
+                <div class="small text-muted">${b.member_count} members × 1,000 = ${fc(b.amount_due)}</div>
+                ${b.payment_reference ? `<div class="small text-success">Ref: ${b.payment_reference}</div>` : ''}
+            </div>
+            <div class="d-flex flex-column gap-1 align-items-end">
+                <span class="badge ${b.status==='paid'?'bg-success':b.status==='free'?'bg-info':'bg-danger'}">${b.status}</span>
+                ${b.status==='unpaid'?`<button class="btn btn-sm btn-success" style="font-size:0.7rem"
+                    onclick="openMarkPaid(${b.group_id},'${b.period_start}',${b.amount_due})">Mark Paid</button>`:''}
+            </div>
+        </div>
+    `).join('') || '<div class="text-muted p-2">No billing history</div>';
+
+    document.getElementById('groupDetail').scrollIntoView({behavior:'smooth'});
+}
+
+function closeDetail() {
+    document.getElementById('groupDetail').style.display = 'none';
+}
+
+async function toggleFree(groupId, isFree) {
+    if (!confirm(`Mark group as ${isFree ? 'free' : 'paid (chargeable)'}?`)) return;
+    await fetch(`/api/owner/group/${groupId}/toggle-free`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({is_free: isFree})
+    });
+    loadStats();
+}
+
+async function toggleActive(groupId, active) {
+    const action = active ? 'activate' : 'suspend';
+    if (!confirm(`${action.charAt(0).toUpperCase()+action.slice(1)} this group?`)) return;
+    await fetch(`/api/owner/group/${groupId}/activate`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({active})
+    });
+    loadStats();
+}
+
+async function toggleProfits(groupId, unlock) {
+    if (!confirm(`${unlock ? 'Unlock' : 'Lock'} profit distribution for this group?`)) return;
+    await fetch(`/api/owner/group/${groupId}/unlock-profits`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({unlock})
+    });
+    loadStats();
+}
+
+function openMarkPaid(groupId, periodStart, amountDue) {
+    document.getElementById('mpGroupId').value     = groupId;
+    document.getElementById('mpPeriodStart').value = periodStart;
+    document.getElementById('mpAmount').value      = amountDue;
+    document.getElementById('mpRef').value         = '';
+    new bootstrap.Modal(document.getElementById('markPaidModal')).show();
+}
+
+async function submitMarkPaid() {
+    const res = await fetch('/api/owner/subscription/mark-paid', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+            group_id:          parseInt(document.getElementById('mpGroupId').value),
+            period_start:      document.getElementById('mpPeriodStart').value,
+            amount_paid:       parseInt(document.getElementById('mpAmount').value),
+            payment_reference: document.getElementById('mpRef').value
+        })
+    });
+    const data = await res.json();
+    if (res.ok) {
+        bootstrap.Modal.getInstance(document.getElementById('markPaidModal')).hide();
+        loadStats();
+    } else {
+        alert(data.error || 'Failed');
+    }
+}
+
+async function generateBills() {
+    if (!confirm('Generate month-end bills for all groups?')) return;
+    const res  = await fetch('/api/owner/subscription/generate-bills', {method:'POST'});
+    const data = await res.json();
+    alert(data.message || 'Done');
+    loadStats();
+}
+
+async function sendReminders() {
+    if (!confirm('Send SMS reminders for loans due in 1-3 days?')) return;
+    const res  = await fetch('/api/reminders/loan-due', {method:'POST'});
+    const data = await res.json();
+    alert(`Sent: ${data.sent}, Errors: ${data.errors}`);
+}
+
+loadStats();
+setInterval(loadStats, 60000); // Auto-refresh every minute
+</script>
+</body>
+</html>

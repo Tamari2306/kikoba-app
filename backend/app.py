@@ -47,7 +47,6 @@ app.config["MAIL_PASSWORD"]       = os.environ.get("MAIL_PASSWORD", "")
 app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "noreply@kikoba.app")
 # Mail initialized lazily — only when MAIL_USERNAME is configured
 mail = None
-ts   = URLSafeTimedSerializer(app.config["SECRET_KEY"]) if TOKENS_AVAILABLE else None
 
 def get_mail():
     """Return mail instance, initializing only if credentials are set."""
@@ -90,18 +89,42 @@ def get_current_group_id():
 # ==================== ROLE-BASED ACCESS CONTROL ====================
 
 from functools import wraps
-from auth import (
-    get_current_user, get_all_memberships, get_current_group_id as auth_get_group_id,
-    require_auth, require_member as require_any_member_supabase,
-    require_treasurer as require_treasurer_or_above_supabase,
-    require_admin as require_admin_supabase,
-    verify_supabase_jwt
-)
-from notifications import (
-    send_password_reset_email, send_welcome_email,
-    send_sms, send_loan_due_reminder, send_penalty_started_sms,
-    send_subscription_reminder_sms
-)
+try:
+    from auth import (
+        get_current_user, get_all_memberships,
+        require_auth,
+        require_member as require_any_member_supabase,
+        require_treasurer as require_treasurer_or_above_supabase,
+        require_admin as require_admin_supabase,
+        verify_supabase_jwt
+    )
+    SUPABASE_AUTH_ENABLED = True
+except ImportError as e:
+    print(f"⚠️  auth.py not found or error: {e} — Supabase Auth disabled")
+    SUPABASE_AUTH_ENABLED = False
+    def get_current_user(): return None
+    def get_all_memberships(uid): return []
+    def verify_supabase_jwt(t): return None
+    def require_any_member_supabase(f): return f
+    def require_treasurer_or_above_supabase(f): return f
+    def require_admin_supabase(f): return f
+
+try:
+    from notifications import (
+        send_password_reset_email, send_welcome_email,
+        send_sms, send_loan_due_reminder, send_penalty_started_sms,
+        send_subscription_reminder_sms
+    )
+    NOTIFICATIONS_ENABLED = True
+except ImportError as e:
+    print(f"⚠️  notifications.py not found or error: {e} — notifications disabled")
+    NOTIFICATIONS_ENABLED = False
+    def send_password_reset_email(*a, **k): return False
+    def send_welcome_email(*a, **k): return False
+    def send_sms(*a, **k): return False
+    def send_loan_due_reminder(*a, **k): return False
+    def send_penalty_started_sms(*a, **k): return False
+    def send_subscription_reminder_sms(*a, **k): return False
 try:
     from flask_mail import Mail, Message
     MAIL_AVAILABLE = True
@@ -119,6 +142,9 @@ except ImportError:
     SignatureExpired = Exception
     BadSignature = Exception
     print("WARNING: itsdangerous not installed. Run: pip install itsdangerous")
+
+# Initialize the password-reset serializer after its optional dependency is loaded.
+ts = URLSafeTimedSerializer(app.config["SECRET_KEY"]) if TOKENS_AVAILABLE else None
 
 def get_current_role():
     """Return the role of the currently logged-in user (admin or member)."""
