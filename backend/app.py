@@ -2212,6 +2212,61 @@ def forgot_password():
     return render_template('forgot_password.html',
                            success="If that email is registered, a reset link has been sent.")
 
+@app.route("/admin/set-supabase-password", methods=["GET", "POST"])
+def set_supabase_password():
+    # Import lazily so the application can start without loading the optional
+    # Supabase client until this admin endpoint is used.
+    import importlib
+
+    try:
+        create_client = importlib.import_module("supabase").create_client
+    except ImportError as exc:
+        raise RuntimeError(
+            "The Supabase client is required for this endpoint. "
+            "Install it with: pip install supabase"
+        ) from exc
+
+    if request.method == "GET":
+        return """
+        <form method="POST">
+            <input name="email" type="email" placeholder="Email" required>
+            <input name="password" type="password" placeholder="New password" required>
+            <button type="submit">Set Password</button>
+        </form>
+        """
+
+    email = request.form.get("email", "").strip()
+    password = request.form.get("password", "")
+
+    if len(password) < 6:
+        return "Password must be at least 6 characters", 400
+
+    supabase_admin = create_client(
+        SUPABASE_URL,
+        os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    )
+
+    # Find the Supabase Auth user
+    users = supabase_admin.auth.admin.list_users()
+
+    user = next(
+        (u for u in users if u.email.lower() == email.lower()),
+        None
+    )
+
+    if not user:
+        return "Supabase Auth user not found", 404
+
+    # Set the password
+    supabase_admin.auth.admin.update_user_by_id(
+        user.id,
+        {
+            "password": password,
+            "email_confirm": True
+        }
+    )
+
+    return f"Password successfully set for {email}. <a href='/login'>Go to login</a>"
 
 @app.route('/reset-password', methods=['GET'])
 def reset_password_page():
