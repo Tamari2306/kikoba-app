@@ -47,7 +47,7 @@ app.config["MAIL_PASSWORD"]       = os.environ.get("MAIL_PASSWORD", "")
 app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "noreply@kikoba.app")
 # Mail initialized lazily — only when MAIL_USERNAME is configured
 mail = None
-ts = None
+ts   = None  # Supabase Auth handles password reset tokens
 
 def get_mail():
     """Return mail instance, initializing only if credentials are set."""
@@ -300,7 +300,7 @@ def require_treasurer_or_above(f):
         if role not in ("admin", "treasurer"):
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "Treasurer or admin access required"}), 403
-            return redirect("/member-login")
+            return redirect("/login")
         return f(*args, **kwargs)
     return decorated
 
@@ -312,7 +312,7 @@ def require_any_member(f):
         if not role:
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "Authentication required"}), 401
-            return redirect("/member-login")
+            return redirect("/login")
         return f(*args, **kwargs)
     return decorated
 
@@ -1072,16 +1072,6 @@ def signup():
             cursor.close()
             return render_template("signup.html", error="Password must be at least 6 characters")
 
-        cursor.execute("SELECT id FROM members WHERE email = %s", (email,))
-        if cursor.fetchone():
-            cursor.close()
-            return render_template("signup.html", error="Email already registered")
-
-        cursor.execute("SELECT id FROM members WHERE phone = %s", (phone,))
-        if cursor.fetchone():
-            cursor.close()
-            return render_template("signup.html", error="Phone number already registered")
-
         cursor.execute("""
             INSERT INTO members (name, phone, email, password, is_system, role, is_active, joined_date)
             VALUES (%s, %s, %s, %s, 1, 'admin', 1, CURRENT_DATE)
@@ -1558,62 +1548,6 @@ def record_jamii_deduction():
 
 # ==================== MEMBER AUTH ROUTES ====================
 
-@app.route('/member-login', methods=['GET', 'POST'])
-def member_login():
-    """Login for regular members (admin, treasurer, member roles)."""
-    # Already logged in as system admin → go to dashboard
-    if session.get("user_id") and session.get("role") in ("admin", "treasurer"):
-        return redirect("/dashboard")
-    # Already logged in as member → go to portal
-    if session.get("role") in ("admin", "treasurer", "member"):
-        return redirect("/member-portal")
-
-    db = get_db()
-    error = None
-
-    if request.method == 'POST':
-        phone = (request.form.get("phone") or "").strip()
-        password = request.form.get("password") or ""
-        group_code = (request.form.get("group_code") or "").strip()
-
-        if not phone or not password:
-            error = "Phone number and password are required"
-        else:
-            cursor = get_cursor(db)
-            # Find member by phone + group_id (group_code is group_id for now)
-            try:
-                gid = int(group_code)
-            except (ValueError, TypeError):
-                cursor.close()
-                return render_template("member_login.html", error="Invalid group code")
-
-            cursor.execute("""
-                SELECT id, name, password, role, is_active, group_id
-                FROM members
-                WHERE phone = %s AND group_id = %s AND is_system = 0
-                LIMIT 1
-            """, (phone, gid))
-            member = cursor.fetchone()
-            cursor.close()
-
-            if not member:
-                error = "Member not found in that group"
-            elif not member["password"]:
-                error = "Your account has no password set. Ask your admin to set one."
-            elif not member["is_active"]:
-                error = "Your account has been deactivated. Contact your admin."
-            elif not check_password_hash(member["password"], password):
-                error = "Incorrect password"
-            else:
-                session.clear()
-                session["member_id"] = member["id"]
-                session["group_id"] = member["group_id"]
-                session["role"] = member["role"]
-                session["member_name"] = member["name"]
-                return redirect("/member-portal")
-
-    return render_template("member_login.html", error=error)
-
 
 @app.route('/member-portal')
 @require_any_member
@@ -1624,7 +1558,7 @@ def member_portal():
         return redirect("/dashboard")
     member_id = session.get("member_id")
     if not member_id:
-        return redirect("/member-login")
+        return redirect("/login")
     return render_template("member_portal.html",
                            member_id=member_id,
                            member_name=session.get("member_name", ""))
@@ -2347,10 +2281,82 @@ def reset_password_page():
     return render_template('reset_password.html', token=None, error=None)
 
 
-@app.route('/login')
+@app.route('/login', methods=['GET', 'POST'])
 def login_page():
-    """Serve the Supabase Auth login page."""
-    return render_template('login.html',
+    """
+    Unified login for all roles: admin, treasurer, member.
+    GET  → serve the login page (Supabase JS handles auth)
+    POST → legacy fallback using phone + group_id + password (session-based)
+    """
+    # Already logged in → redirect appropriately
+    if session.get("user_id") and session.get("group_id"):
+        role = session.get("role", "member")
+        if role in ("admin", "treasurer"):
+            return redirect("/dashboard")
+        return redirect("/member-portal")
+
+    # POST: session-based login (fallback when Supabase JS not available)
+    if request.method == "POST":
+        phone      = (request.form.get("phone")      or "").strip()
+        password   =  request.form.get("password")   or ""
+        group_code = (request.form.get("group_code") or "").strip()
+
+        if not phone or not password or not group_code:
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Group ID, phone number and password are required.")
+        try:
+            gid = int(group_code)
+        except (ValueError, TypeError):
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Invalid Group ID.")
+
+        db = get_db()
+        cursor = get_cursor(db)
+        # Allow is_system=1 (admin created via signup) AND is_system=0 (regular members)
+        cursor.execute("""
+            SELECT id, name, password, role, is_active, group_id, is_system
+            FROM members
+            WHERE phone = %s AND group_id = %s
+            LIMIT 1
+        """, (phone, gid))
+        user = cursor.fetchone()
+        cursor.close()
+
+        if not user:
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Invalid Group ID, phone number or password.")
+        if not user["password"] or not check_password_hash(user["password"], password):
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Invalid Group ID, phone number or password.")
+        if not user.get("is_active", 1):
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Your account is inactive. Contact your admin.")
+
+        role = (user["role"] or ("admin" if user["is_system"] else "member")).strip().lower()
+
+        session.clear()
+        session["user_id"]     = user["id"]
+        session["member_id"]   = user["id"]
+        session["group_id"]    = user["group_id"]
+        session["role"]        = role
+        session["member_name"] = user["name"]
+
+        if role in ("admin", "treasurer"):
+            return redirect("/dashboard")
+        return redirect("/member-portal")
+
+    # GET → serve login page
+    return render_template("login.html",
                            supabase_url=SUPABASE_URL,
                            supabase_anon=SUPABASE_ANON)
 
@@ -2664,7 +2670,7 @@ def get_members():
     
     cursor = get_cursor(db)
     cursor.execute(
-        "SELECT * FROM members WHERE group_id = %s AND is_system = 0", 
+        "SELECT * FROM members WHERE group_id = %s ORDER BY is_system DESC, id ASC", 
         (group_id,)
     )
     members = cursor.fetchall()
