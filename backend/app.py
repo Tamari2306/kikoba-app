@@ -2180,6 +2180,113 @@ def owner_generate_bills():
 
 # ==================== SUPABASE AUTH ROUTES ====================
 
+
+@app.route('/api/auth/set-session', methods=['POST'])
+def set_session():
+    """
+    Called by frontend after Supabase JS login.
+    Verifies JWT, finds all memberships, optionally sets Flask session
+    for a specific group_id.
+    Returns list of groups the user belongs to.
+    """
+    data     = request.get_json() or {}
+    token    = data.get("token", "")
+    group_id = data.get("group_id")  # Optional — set if user picked a group
+
+    if not token:
+        return jsonify({"error": "token required"}), 400
+
+    # Verify JWT
+    if SUPABASE_AUTH_ENABLED:
+        payload = verify_supabase_jwt(token)
+    else:
+        # Fallback: decode without verification
+        try:
+            import base64, json as _json
+            parts   = token.split('.')
+            padded  = parts[1] + '=' * (4 - len(parts[1]) % 4)
+            payload = _json.loads(base64.urlsafe_b64decode(padded))
+        except Exception:
+            return jsonify({"error": "Invalid token"}), 401
+
+    if not payload:
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    auth_user_id = payload.get("sub", "")
+    jwt_phone    = payload.get("phone", "")
+    jwt_email    = payload.get("email", "")
+
+    # Find all memberships for this user
+    db = get_db()
+    cursor = get_cursor(db)
+    cursor.execute("""
+        SELECT m.id, m.name, m.phone, m.email, m.group_id, m.role,
+               COALESCE(m.is_active, 1) AS is_active,
+               g.name AS group_name,
+               m.is_system
+        FROM members m
+        JOIN groups g ON g.id = m.group_id
+        WHERE (
+            m.user_id = %s
+            OR (m.phone IS NOT NULL AND m.phone != '' AND m.phone = %s)
+            OR (m.email IS NOT NULL AND m.email != '' AND m.email = %s)
+        )
+        AND COALESCE(m.is_active, 1) = 1
+        ORDER BY g.name
+    """, (auth_user_id, jwt_phone, jwt_email))
+    rows = cursor.fetchall()
+
+    # Deduplicate by (member_id, group_id) — avoid showing same group twice
+    seen   = set()
+    groups = []
+    for r in rows:
+        key = (r['id'], r['group_id'])
+        if key not in seen:
+            seen.add(key)
+            role = r['role'] or ('admin' if r['is_system'] else 'member')
+            groups.append({
+                "member_id":  r['id'],
+                "group_id":   r['group_id'],
+                "group_name": r['group_name'],
+                "role":       role,
+                "name":       r['name'],
+            })
+        # Auto-link user_id if not yet set
+        if auth_user_id:
+            try:
+                cursor.execute(
+                    "UPDATE members SET user_id = %s WHERE id = %s AND user_id IS NULL",
+                    (auth_user_id, r['id'])
+                )
+            except Exception:
+                pass
+
+    db.commit()
+    cursor.close()
+
+    if not groups:
+        return jsonify({"error": "No Kikoba membership found for this account."}), 404
+
+    # If group_id provided (user picked one), set Flask session now
+    if group_id:
+        picked = next((g for g in groups if g['group_id'] == int(group_id)), None)
+        if picked:
+            session.clear()
+            session['user_id']     = picked['member_id']
+            session['member_id']   = picked['member_id']
+            session['group_id']    = picked['group_id']
+            session['role']        = picked['role']
+            session['member_name'] = picked['name']
+            return jsonify({
+                "status":    "session_set",
+                "role":      picked['role'],
+                "group_id":  picked['group_id'],
+                "redirect":  "/dashboard" if picked['role'] in ("admin","treasurer") else "/member-portal"
+            })
+
+    # Return all groups for the picker
+    return jsonify({"status": "pick_group", "groups": groups})
+
 @app.route('/api/auth/memberships', methods=['GET'])
 def get_memberships():
     """Return all group memberships for the authenticated user."""
@@ -2295,65 +2402,91 @@ def login_page():
             return redirect("/dashboard")
         return redirect("/member-portal")
 
-    # POST: session-based login (fallback when Supabase JS not available)
+    # POST: form-based login — phone/email + password, no Group ID needed
     if request.method == "POST":
-        phone      = (request.form.get("phone")      or "").strip()
-        password   =  request.form.get("password")   or ""
-        group_code = (request.form.get("group_code") or "").strip()
+        identifier = (request.form.get("identifier") or
+                      request.form.get("phone")      or
+                      request.form.get("email")      or "").strip()
+        password   =  request.form.get("password") or ""
+        group_id   = (request.form.get("group_id") or "").strip()  # optional: from group picker
 
-        if not phone or not password or not group_code:
+        if not identifier or not password:
             return render_template("login.html",
                                    supabase_url=SUPABASE_URL,
                                    supabase_anon=SUPABASE_ANON,
-                                   error="Group ID, phone number and password are required.")
-        try:
-            gid = int(group_code)
-        except (ValueError, TypeError):
-            return render_template("login.html",
-                                   supabase_url=SUPABASE_URL,
-                                   supabase_anon=SUPABASE_ANON,
-                                   error="Invalid Group ID.")
+                                   error="Phone/email and password are required.")
 
         db = get_db()
         cursor = get_cursor(db)
-        # Allow is_system=1 (admin created via signup) AND is_system=0 (regular members)
+
+        # Find ALL memberships matching phone or email
         cursor.execute("""
-            SELECT id, name, password, role, is_active, group_id, is_system
-            FROM members
-            WHERE phone = %s AND group_id = %s
-            LIMIT 1
-        """, (phone, gid))
-        user = cursor.fetchone()
+            SELECT m.id, m.name, m.password, m.role, m.is_active,
+                   m.group_id, m.is_system, g.name AS group_name
+            FROM members m
+            JOIN groups g ON g.id = m.group_id
+            WHERE (m.phone = %s OR m.email = %s)
+            ORDER BY g.name
+        """, (identifier, identifier))
+        matches = cursor.fetchall()
         cursor.close()
 
-        if not user:
+        if not matches:
             return render_template("login.html",
                                    supabase_url=SUPABASE_URL,
                                    supabase_anon=SUPABASE_ANON,
-                                   error="Invalid Group ID, phone number or password.")
-        if not user["password"] or not check_password_hash(user["password"], password):
+                                   error="Account not found. Check your phone/email.")
+
+        # Verify password against first match (same password across all groups)
+        first = matches[0]
+        if not first["password"] or not check_password_hash(first["password"], password):
             return render_template("login.html",
                                    supabase_url=SUPABASE_URL,
                                    supabase_anon=SUPABASE_ANON,
-                                   error="Invalid Group ID, phone number or password.")
-        if not user.get("is_active", 1):
+                                   error="Incorrect password.")
+
+        # Build deduplicated group list
+        seen   = set()
+        groups = []
+        for u in matches:
+            if u['group_id'] in seen: continue
+            seen.add(u['group_id'])
+            if not u.get('is_active', 1): continue
+            groups.append(u)
+
+        if not groups:
             return render_template("login.html",
                                    supabase_url=SUPABASE_URL,
                                    supabase_anon=SUPABASE_ANON,
                                    error="Your account is inactive. Contact your admin.")
 
-        role = (user["role"] or ("admin" if user["is_system"] else "member")).strip().lower()
+        # If only one group OR user already picked a group → set session
+        def set_session_and_redirect(u):
+            role = (u["role"] or ("admin" if u["is_system"] else "member")).strip().lower()
+            session.clear()
+            session["user_id"]     = u["id"]
+            session["member_id"]   = u["id"]
+            session["group_id"]    = u["group_id"]
+            session["role"]        = role
+            session["member_name"] = u["name"]
+            return redirect("/dashboard" if role in ("admin","treasurer") else "/member-portal")
 
-        session.clear()
-        session["user_id"]     = user["id"]
-        session["member_id"]   = user["id"]
-        session["group_id"]    = user["group_id"]
-        session["role"]        = role
-        session["member_name"] = user["name"]
+        if group_id:
+            picked = next((u for u in groups if str(u['group_id']) == str(group_id)), None)
+            if picked:
+                return set_session_and_redirect(picked)
 
-        if role in ("admin", "treasurer"):
-            return redirect("/dashboard")
-        return redirect("/member-portal")
+        if len(groups) == 1:
+            return set_session_and_redirect(groups[0])
+
+        # Multiple groups → show picker (re-render with groups list)
+        return render_template("login.html",
+                               supabase_url=SUPABASE_URL,
+                               supabase_anon=SUPABASE_ANON,
+                               show_picker=True,
+                               picker_groups=groups,
+                               identifier=identifier,
+                               password=password)
 
     # GET → serve login page
     return render_template("login.html",
