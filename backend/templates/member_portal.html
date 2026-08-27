@@ -44,30 +44,21 @@
             </div>
         </div>
     </div>
-    <div class="col-6 col-md-4">
-        <div class="card border-0 shadow-sm h-100">
-            <div class="card-body text-center">
-                <div class="text-muted small mb-1">Profit Share</div>
-                <div class="fw-bold fs-5 text-success" id="profitShare">—</div>
-            </div>
-        </div>
-    </div>
-    <div class="col-6 col-md-4">
+    <div class="col-12 col-md-6">
         <div class="card border-0 shadow-sm h-100">
             <div class="card-body text-center">
                 <div class="text-muted small mb-1">Net Position</div>
                 <div class="fw-bold fs-5" id="netPosition">—</div>
+                <small class="text-muted">Savings minus loans and penalties due</small>
             </div>
         </div>
     </div>
-    <div class="col-6 col-md-4">
-        <div class="card border-0 shadow-sm h-100">
-            <div class="card-body text-center">
-                <div class="text-muted small mb-1">Expected Payout</div>
-                <div class="fw-bold fs-5" id="netPayout">—</div>
-            </div>
-        </div>
-    </div>
+</div>
+
+<div class="alert alert-light border small mb-4">
+    <i class="fas fa-info-circle me-1 text-success"></i>
+    Profit distribution figures will be shown here once your group's cycle
+    ends and the distribution method is finalised by the admin.
 </div>
 
 <!-- My Contributions -->
@@ -145,13 +136,9 @@ async function loadMyData() {
     document.getElementById('totalSavings').textContent = fc(s.total_savings);
     document.getElementById('loanBalance').textContent  = fc(s.remaining_loans);
     document.getElementById('penaltiesDue').textContent = fc(s.total_penalties);
-    document.getElementById('profitShare').textContent  = fc(s.expected_profit_share);
     const np = parseFloat(s.net_contribution_position)||0;
-    const no = parseFloat(s.net_payout)||0;
     const npEl = document.getElementById('netPosition');
-    const noEl = document.getElementById('netPayout');
     npEl.textContent = fc(np); npEl.className = `fw-bold fs-5 ${np>=0?'text-success':'text-danger'}`;
-    noEl.textContent = fc(no); noEl.className = `fw-bold fs-5 ${no>=0?'text-success':'text-danger'}`;
 
     // Contributions
     const ch = data.contribution_history || [];

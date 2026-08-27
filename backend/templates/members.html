@@ -1,81 +1,76 @@
 {% extends "base.html" %}
 {% block content %}
 
-<style>
-    .stat-card {
-        background: white;
-        border-radius: 10px;
-        padding: 20px;
-        margin-bottom: 15px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        border: 1px solid #e9ecef;
-    }
-    .stat-label {
-        color: #6c757d;
-        font-size: 0.9rem;
-        margin-bottom: 5px;
-        font-weight: 500;
-    }
-    .stat-value {
-        font-size: 1.5rem;
-        font-weight: bold;
-        color: #667eea;
-    }
-    .card {
-        margin-bottom: 20px;
-        border: none;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-    }
-    .card-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        font-weight: 600;
-    }
-    .member-row {
-        cursor: pointer;
-        transition: background 0.15s;
-    }
-    .member-row:hover {
-        background: #f0f4ff !important;
-    }
-    .search-box {
-        max-width: 320px;
-    }
-</style>
+<!-- Manage Member Modal -->
+<div class="modal fade" id="manageMemberModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-success text-white">
+                <h5 class="modal-title">
+                    <i class="fas fa-user-cog me-2"></i>Manage Member
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="mgMemberId">
+                <div class="mb-2">
+                    <label class="form-label fw-bold">Member</label>
+                    <input type="text" class="form-control" id="mgMemberName" disabled>
+                </div>
 
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h1 class="fw-bold">
-        <i class="fas fa-users me-2 text-primary"></i>Members
-    </h1>
-    <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addMemberModal">
-        <i class="fas fa-plus me-1"></i> Add Member
-    </button>
-</div>
+                <!-- Role Assignment -->
+                <div class="mb-3 border rounded p-3">
+                    <label class="form-label fw-bold">Assign Role</label>
+                    <select class="form-select" id="mgRole">
+                        <option value="member">Member (read-only)</option>
+                        <option value="treasurer">Treasurer (can record transactions)</option>
+                        <option value="admin">Admin (full access)</option>
+                    </select>
+                    <button class="btn btn-success w-100 mt-2" onclick="saveRole()">
+                        <i class="fas fa-save me-1"></i> Save Role
+                    </button>
+                </div>
 
-<!-- Summary Stats -->
-<div class="row mb-3" id="summaryRow">
-    <div class="col-6 col-md-3">
-        <div class="stat-card">
-            <div class="stat-label">Total Members</div>
-            <div class="stat-value" id="statTotalMembers">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-md-3">
-        <div class="stat-card">
-            <div class="stat-label">Total Contributions</div>
-            <div class="stat-value" id="statTotalContrib">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-md-3">
-        <div class="stat-card">
-            <div class="stat-label">Total Loans Outstanding</div>
-            <div class="stat-value" id="statTotalLoans">—</div>
-        </div>
-    </div>
-    <div class="col-6 col-md-3">
-        <div class="stat-card">
-            <div class="stat-label">Total Penalties Due</div>
-            <div class="stat-value" id="statTotalPenalties">—</div>
+                <!-- Set/Reset Password + Login Access -->
+                <div class="mb-3 border rounded p-3">
+                    <label class="form-label fw-bold">Set Login Access</label>
+                    <div class="mb-2">
+                        <label class="form-label small text-muted">Email (optional — for login too)</label>
+                        <input type="email" class="form-control" id="mgEmail"
+                               placeholder="member@email.com">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small text-muted">Password</label>
+                        <div class="input-group">
+                            <input type="password" class="form-control" id="mgPassword"
+                                   placeholder="New password (min 6 chars)">
+                            <button class="btn btn-outline-secondary" type="button"
+                                    onclick="toggleMgPw()">
+                                <i class="fas fa-eye" id="mgEye"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <button class="btn btn-warning w-100 mt-2" onclick="savePassword()">
+                        <i class="fas fa-key me-1"></i> Set Login Access
+                    </button>
+                    <small class="text-muted d-block mt-1">
+                        Member can log in with phone{{" or email" if provided}} + this password.
+                    </small>
+                </div>
+
+                <!-- Activate / Deactivate -->
+                <div class="border rounded p-3">
+                    <label class="form-label fw-bold">Account Status</label>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-outline-success flex-fill" onclick="setActive(1)">
+                            <i class="fas fa-check me-1"></i> Activate
+                        </button>
+                        <button class="btn btn-outline-danger flex-fill" onclick="setActive(0)">
+                            <i class="fas fa-ban me-1"></i> Deactivate
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -85,21 +80,25 @@
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header bg-success text-white">
-                <h5 class="modal-title"><i class="fas fa-user-plus me-2"></i>Add New Member</h5>
+                <h5 class="modal-title"><i class="fas fa-user-plus me-2"></i>Add Member</h5>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <form id="add-member-form">
+                <form id="addMemberForm">
                     <div class="mb-3">
                         <label class="form-label fw-bold">Full Name <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" id="newMemberName" placeholder="e.g. Amina Hassan" required>
+                        <input type="text" id="newName" class="form-control" required>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label fw-bold">Phone Number</label>
-                        <input type="text" class="form-control" id="newMemberPhone" placeholder="e.g. 0712 345 678">
+                        <label class="form-label fw-bold">Phone</label>
+                        <input type="tel" id="newPhone" class="form-control" placeholder="0712345678">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold">Joined Date</label>
+                        <input type="date" id="newDate" class="form-control">
                     </div>
                     <button type="submit" class="btn btn-success w-100">
-                        <i class="fas fa-check me-1"></i> Add Member
+                        <i class="fas fa-plus me-1"></i> Add Member
                     </button>
                 </form>
             </div>
@@ -112,25 +111,25 @@
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header bg-warning text-dark">
-                <h5 class="modal-title"><i class="fas fa-user-edit me-2"></i>Edit Member</h5>
+                <h5 class="modal-title"><i class="fas fa-edit me-2"></i>Edit Member</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <form id="edit-member-form">
+                <form id="editMemberForm">
                     <input type="hidden" id="editMemberId">
                     <div class="mb-3">
-                        <label class="form-label fw-bold">Full Name <span class="text-danger">*</span></label>
-                        <input type="text" class="form-control" id="editMemberName" required>
+                        <label class="form-label fw-bold">Full Name</label>
+                        <input type="text" id="editName" class="form-control" required>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label fw-bold">Phone Number</label>
-                        <input type="text" class="form-control" id="editMemberPhone">
+                        <label class="form-label fw-bold">Phone</label>
+                        <input type="tel" id="editPhone" class="form-control">
                     </div>
-                    <button type="submit" class="btn btn-warning w-100 mb-2">
+                    <button type="submit" class="btn btn-warning w-100">
                         <i class="fas fa-save me-1"></i> Save Changes
                     </button>
                 </form>
-                <button type="button" class="btn btn-danger w-100" id="deleteMemberBtn">
+                <button class="btn btn-danger w-100 mt-2" id="deleteMemberBtn">
                     <i class="fas fa-trash me-1"></i> Delete Member
                 </button>
             </div>
@@ -138,447 +137,274 @@
     </div>
 </div>
 
-<!-- Set Member Password Modal -->
-<div class="modal fade" id="setPasswordModal" tabindex="-1" aria-labelledby="setPasswordModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header bg-primary text-white">
-                <h5 class="modal-title" id="setPasswordModalLabel">
-                    <i class="fas fa-key me-2"></i>Set Member Access
-                </h5>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
-            </div>
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1 class="fw-bold"><i class="fas fa-users me-2 text-success"></i>Members</h1>
+    <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#addMemberModal">
+        <i class="fas fa-user-plus me-1"></i> Add Member
+    </button>
+</div>
 
-            <div class="modal-body">
-                <input type="hidden" id="passwordMemberId">
+<!-- Summary -->
+<div class="row g-3 mb-4" id="summaryRow"></div>
 
-                <div class="mb-3">
-                    <label class="form-label fw-bold">Member</label>
-                    <input type="text" class="form-control" id="passwordMemberName" readonly>
-                </div>
-
-                <div class="mb-3">
-                    <label class="form-label fw-bold">New Password <span class="text-danger">*</span></label>
-                    <input type="password"
-                           class="form-control"
-                           id="memberNewPassword"
-                           minlength="6"
-                           autocomplete="new-password"
-                           placeholder="At least 6 characters">
-                    <div class="form-text">The password will be securely hashed before being stored.</div>
-                </div>
-
-                <div class="mb-3">
-                    <label class="form-label fw-bold">Confirm Password <span class="text-danger">*</span></label>
-                    <input type="password"
-                           class="form-control"
-                           id="memberConfirmPassword"
-                           minlength="6"
-                           autocomplete="new-password"
-                           placeholder="Enter the password again">
-                </div>
-
-                <div class="mb-3">
-                    <label class="form-label fw-bold">Role</label>
-                    <select class="form-select" id="memberAccessRole">
-                        <option value="member">Member</option>
-                        <option value="treasurer">Treasurer</option>
-                        <option value="admin">Admin</option>
-                    </select>
-                </div>
-
-                <div id="passwordError" class="alert alert-danger d-none" role="alert"></div>
-                <div id="passwordSuccess" class="alert alert-success d-none" role="alert"></div>
-            </div>
-
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
-                    Cancel
-                </button>
-                <button type="button" class="btn btn-primary" id="saveMemberPasswordBtn" onclick="saveMemberPassword()">
-                    <i class="fas fa-save me-1"></i> Save Access
-                </button>
-            </div>
+<!-- Table -->
+<div class="card shadow-sm border-0">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0" id="membersTable">
+                <thead class="table-success">
+                    <tr>
+                        <th>#</th>
+                        <th>Name</th>
+                        <th>Phone</th>
+                        <th>Joined</th>
+                        <th>Role</th>
+                        <th class="text-end">Savings</th>
+                        <th class="text-end">HISA Units</th>
+                        <th class="text-end">Loans</th>
+                        <th class="text-end">Penalties</th>
+                        <th class="text-center">Actions</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
         </div>
     </div>
 </div>
 
-<!-- Members Table -->
-<div class="card shadow-sm">
-    <div class="card-header d-flex justify-content-between align-items-center">
-        <span><i class="fas fa-table me-2"></i>All Members</span>
-        <input type="text" class="form-control form-control-sm search-box bg-white text-dark"
-               id="memberSearch" placeholder="🔍 Search members...">
-    </div>
-    <div class="table-responsive">
-        <table class="table table-hover align-middle mb-0">
-            <thead class="table-light">
-                <tr>
-                    <th>#</th>
-                    <th>Name</th>
-                    <th>Phone</th>
-                    <th class="text-end">HISA Units</th>
-                    <th class="text-end">Total Contributions</th>
-                    <th class="text-end">Loan Outstanding</th>
-                    <th class="text-end">Penalties Due</th>
-                    <th class="text-center">Actions</th>
-                </tr>
-            </thead>
-            <tbody id="membersTableBody">
-                <tr><td colspan="8" class="text-center py-4 text-muted">
-                    <div class="spinner-border spinner-border-sm me-2" role="status"></div>
-                    Loading members...
-                </td></tr>
-            </tbody>
-        </table>
-    </div>
-</div>
-
 <script>
-const API = '/api/members';
+function fc(n){const v=parseFloat(n);return isNaN(v)?'0 TZS':v.toLocaleString('en-TZ',{maximumFractionDigits:0})+' TZS';}
 
-function fmt(amount) {
-    return new Intl.NumberFormat('en-TZ', {
-        minimumFractionDigits: 0,
-        maximumFractionDigits: 0
-    }).format(amount || 0) + ' TZS';
-}
+const roleColor  = {admin:'danger', treasurer:'warning', member:'secondary'};
+const roleLabel  = {admin:'Admin', treasurer:'Treasurer', member:'Member'};
 
 let allMembers = [];
 
-// Escape values before putting member data into an HTML attribute/string.
-function escapeJsString(value) {
-    return String(value ?? '')
-        .replace(/\\/g, '\\\\')
-        .replace(/'/g, "\\'")
-        .replace(/"/g, '\\"')
-        .replace(/\r/g, '\\r')
-        .replace(/\n/g, '\\n');
-}
-
 async function loadMembers() {
-    try {
-        const res = await fetch(API);
-        const members = await res.json();
-
-        if (!Array.isArray(members)) {
-            throw new Error(members.error || 'Unexpected response');
-        }
-
-        allMembers = members;
-        renderMembers(members);
-        renderStats(members);
-    } catch (err) {
-        console.error(err);
-        document.getElementById('membersTableBody').innerHTML =
-            `<tr><td colspan="8" class="text-center text-danger py-4">
-                <i class="fas fa-exclamation-triangle me-2"></i>
-                Failed to load members: ${err.message}
-            </td></tr>`;
-    }
+    const res = await fetch('/api/members');
+    if (!res.ok) return;
+    allMembers = await res.json();
+    renderTable(allMembers);
+    renderSummary(allMembers);
 }
 
-function renderStats(members) {
-    const totalContrib   = members.reduce((s, m) => s + (m.total_contributions || 0), 0);
-    const totalLoans     = members.reduce((s, m) => s + (m.total_outstanding   || 0), 0);
-    const totalPenalties = members.reduce((s, m) => s + (m.total_penalties     || 0), 0);
-
-    document.getElementById('statTotalMembers').textContent   = members.length;
-    document.getElementById('statTotalContrib').textContent   = fmt(totalContrib);
-    document.getElementById('statTotalLoans').textContent     = fmt(totalLoans);
-    document.getElementById('statTotalPenalties').textContent = fmt(totalPenalties);
+function renderSummary(members) {
+    const totalSavings  = members.reduce((s,m) => s + parseFloat(m.total_contributions||0), 0);
+    const totalLoans    = members.reduce((s,m) => s + parseFloat(m.total_outstanding||0), 0);
+    const totalPenalties= members.reduce((s,m) => s + parseFloat(m.total_penalties||0), 0);
+    document.getElementById('summaryRow').innerHTML = `
+        <div class="col-6 col-md-3">
+            <div class="card border-0 shadow-sm text-center p-3">
+                <div class="text-muted small">Total Members</div>
+                <div class="fw-bold fs-4 text-success">${members.length}</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card border-0 shadow-sm text-center p-3">
+                <div class="text-muted small">Total Savings</div>
+                <div class="fw-bold fs-5 text-success">${fc(totalSavings)}</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card border-0 shadow-sm text-center p-3">
+                <div class="text-muted small">Total Loans Due</div>
+                <div class="fw-bold fs-5 text-danger">${fc(totalLoans)}</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="card border-0 shadow-sm text-center p-3">
+                <div class="text-muted small">Total Penalties Due</div>
+                <div class="fw-bold fs-5 text-warning">${fc(totalPenalties)}</div>
+            </div>
+        </div>`;
 }
 
-function renderMembers(members) {
-    const tbody = document.getElementById('membersTableBody');
-
-    if (members.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4 fst-italic">
-            No members found. Add your first member above.
-        </td></tr>`;
-        return;
-    }
-
-    tbody.innerHTML = members.map((m, idx) => `
-        <tr class="member-row"
-            onclick="goToDetails(event, ${m.id})"
-            title="Click to view ${escapeHtml(m.name)}'s details">
-            <td class="text-muted">${idx + 1}</td>
+function renderTable(members) {
+    const tbody = document.querySelector('#membersTable tbody');
+    tbody.innerHTML = members.map((m, i) => `
+        <tr>
+            <td>${i+1}</td>
             <td>
-                <div class="d-flex align-items-center">
-                    <div class="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center me-2"
-                         style="width:34px;height:34px;font-size:0.85rem;flex-shrink:0">
-                        ${escapeHtml((m.name || '?').charAt(0).toUpperCase())}
-                    </div>
-                    <span class="fw-bold">${escapeHtml(m.name)}</span>
-                </div>
-            </td>
-            <td class="text-muted">${escapeHtml(m.phone || '—')}</td>
-            <td class="text-end">${(m.hisa_units || 0).toFixed(2)}</td>
-            <td class="text-end">${fmt(m.total_contributions)}</td>
-            <td class="text-end ${m.total_outstanding > 0 ? 'text-danger fw-bold' : 'text-muted'}">
-                ${fmt(m.total_outstanding)}
-            </td>
-            <td class="text-end ${m.total_penalties > 0 ? 'text-warning fw-bold' : 'text-muted'}">
-                ${fmt(m.total_penalties)}
-            </td>
-            <td class="text-center" onclick="event.stopPropagation()">
-                <a href="/member-details/${m.id}"
-                   class="btn btn-sm btn-outline-primary me-1"
-                   title="View Details">
-                    <i class="fas fa-eye"></i>
+                <a href="/member-details/${m.id}" class="fw-bold text-decoration-none text-dark">
+                    ${m.name}
                 </a>
-
+                ${m.is_active === 0 ? '<span class="badge bg-danger ms-1">Inactive</span>' : ''}
+            </td>
+            <td>${m.phone || '—'}</td>
+            <td>${m.joined_date || '—'}</td>
+            <td>
+                <span class="badge bg-${roleColor[m.role]||'secondary'}">
+                    ${roleLabel[m.role]||'Member'}
+                </span>
+            </td>
+            <td class="text-end text-success">${fc(m.total_contributions)}</td>
+            <td class="text-end text-primary">${(parseFloat(m.hisa_units)||0).toFixed(2)}</td>
+            <td class="text-end ${parseFloat(m.total_outstanding)>0?'text-danger':'text-success'}">
+                ${fc(m.total_outstanding)}
+            </td>
+            <td class="text-end ${parseFloat(m.total_penalties)>0?'text-warning':'text-muted'}">
+                ${fc(m.total_penalties)}
+            </td>
+            <td class="text-center">
+                <button class="btn btn-sm btn-outline-success me-1"
+                        title="Manage role & password"
+                        onclick="openManage(${m.id},'${m.name.replace(/'/g,"\\'")}','${m.role||'member'}','${(m.email||'').replace(/'/g,"\\'")}')">
+                    <i class="fas fa-user-cog"></i>
+                </button>
                 <button class="btn btn-sm btn-outline-warning me-1"
-                        onclick="handleEdit(${m.id}, '${escapeJsString(m.name)}', '${escapeJsString(m.phone || '')}')"
-                        title="Edit Member">
+                        title="Edit name/phone"
+                        onclick="openEdit(${m.id},'${m.name.replace(/'/g,"\\'")}','${m.phone||''}')">
                     <i class="fas fa-edit"></i>
                 </button>
-
-                <button class="btn btn-sm btn-outline-dark"
-                        onclick="openSetPasswordModal(${m.id}, '${escapeJsString(m.name)}', '${escapeJsString(m.role || 'member')}')"
-                        title="Set Password">
-                    <i class="fas fa-key"></i>
-                </button>
+                <a class="btn btn-sm btn-outline-info"
+                   href="/member-details/${m.id}" title="View details">
+                    <i class="fas fa-eye"></i>
+                </a>
             </td>
-        </tr>
-    `).join('');
+        </tr>`).join('');
 }
 
-// Basic HTML escaping for values rendered into the table.
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
+// ── Manage Modal ──────────────────────────────────────────────────────
+function openManage(id, name, role, email) {
+    document.getElementById('mgMemberId').value   = id;
+    document.getElementById('mgMemberName').value = name;
+    document.getElementById('mgRole').value        = role;
+    document.getElementById('mgEmail').value       = email || '';
+    document.getElementById('mgPassword').value    = '';
+    new bootstrap.Modal(document.getElementById('manageMemberModal')).show();
 }
 
-function goToDetails(event, memberId) {
-    // Don't navigate if they clicked on an action button
-    if (event.target.closest('button') || event.target.closest('a')) return;
-    window.location.href = '/member-details/' + memberId;
+function toggleMgPw() {
+    const pw   = document.getElementById('mgPassword');
+    const icon = document.getElementById('mgEye');
+    pw.type = pw.type === 'password' ? 'text' : 'password';
+    icon.classList.toggle('fa-eye');
+    icon.classList.toggle('fa-eye-slash');
 }
 
-// ── Search ────────────────────────────────────────────────────────────────
-document.getElementById('memberSearch').addEventListener('input', function() {
-    const q = this.value.toLowerCase().trim();
-    if (!q) {
-        renderMembers(allMembers);
-        return;
+async function saveRole() {
+    const id   = document.getElementById('mgMemberId').value;
+    const role = document.getElementById('mgRole').value;
+    const res  = await fetch('/api/member/set-role', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({member_id: id, role})
+    });
+    const data = await res.json();
+    if (res.ok) {
+        bootstrap.Modal.getInstance(document.getElementById('manageMemberModal')).hide();
+        alert(data.message || 'Role updated.');
+        loadMembers();
+    } else {
+        alert(data.error || 'Failed to update role.');
     }
+}
 
-    const filtered = allMembers.filter(m =>
-        (m.name || '').toLowerCase().includes(q) ||
-        (m.phone || '').toLowerCase().includes(q)
-    );
+async function savePassword() {
+    const id       = document.getElementById('mgMemberId').value;
+    const role     = document.getElementById('mgRole').value;
+    const email    = document.getElementById('mgEmail').value.trim();
+    const password = document.getElementById('mgPassword').value.trim();
+    if (!password || password.length < 6) {
+        return alert('Password must be at least 6 characters.');
+    }
+    const res = await fetch('/api/member/set-password', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({member_id: id, password, role, email})
+    });
+    const data = await res.json();
+    if (res.ok) {
+        bootstrap.Modal.getInstance(document.getElementById('manageMemberModal')).hide();
+        alert(data.message || 'Password updated.');
+        loadMembers();
+    } else {
+        alert(data.error || 'Failed to update password.');
+    }
+}
 
-    renderMembers(filtered);
-});
+async function setActive(is_active) {
+    const id = document.getElementById('mgMemberId').value;
+    if (!confirm(`${is_active ? 'Activate' : 'Deactivate'} this member?`)) return;
+    const res = await fetch('/api/member/toggle-active', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({member_id: id, is_active})
+    });
+    const data = await res.json();
+    if (res.ok) {
+        bootstrap.Modal.getInstance(document.getElementById('manageMemberModal')).hide();
+        alert(data.message || 'Status updated.');
+        loadMembers();
+    } else {
+        alert(data.error || 'Failed.');
+    }
+}
 
-// ── Add Member ────────────────────────────────────────────────────────────
-document.getElementById('add-member-form').addEventListener('submit', async function(e) {
+// ── Add Member ────────────────────────────────────────────────────────
+document.getElementById('addMemberForm').addEventListener('submit', async e => {
     e.preventDefault();
-    const name  = document.getElementById('newMemberName').value.trim();
-    const phone = document.getElementById('newMemberPhone').value.trim();
-
-    if (!name) return;
-
-    try {
-        const res = await fetch(API, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, phone })
-        });
-
-        const data = await res.json();
-
-        if (res.ok) {
-            bootstrap.Modal.getInstance(document.getElementById('addMemberModal')).hide();
-            this.reset();
-            loadMembers();
-        } else {
-            alert('❌ ' + (data.error || 'Failed to add member'));
-        }
-    } catch (err) {
-        alert('Network error: ' + err.message);
+    const res = await fetch('/api/members', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+            name:        document.getElementById('newName').value,
+            phone:       document.getElementById('newPhone').value,
+            joined_date: document.getElementById('newDate').value,
+        })
+    });
+    const data = await res.json();
+    if (res.ok) {
+        bootstrap.Modal.getInstance(document.getElementById('addMemberModal')).hide();
+        document.getElementById('addMemberForm').reset();
+        loadMembers();
+    } else {
+        alert(data.error || 'Failed to add member.');
     }
 });
 
-// ── Edit Member ───────────────────────────────────────────────────────────
-function handleEdit(id, name, phone) {
-    document.getElementById('editMemberId').value   = id;
-    document.getElementById('editMemberName').value = name;
-    document.getElementById('editMemberPhone').value = phone;
+// ── Edit Member ───────────────────────────────────────────────────────
+function openEdit(id, name, phone) {
+    document.getElementById('editMemberId').value = id;
+    document.getElementById('editName').value     = name;
+    document.getElementById('editPhone').value    = phone;
     new bootstrap.Modal(document.getElementById('editMemberModal')).show();
 }
 
-document.getElementById('edit-member-form').addEventListener('submit', async function(e) {
+document.getElementById('editMemberForm').addEventListener('submit', async e => {
     e.preventDefault();
-    const id    = document.getElementById('editMemberId').value;
-    const name  = document.getElementById('editMemberName').value.trim();
-    const phone = document.getElementById('editMemberPhone').value.trim();
-
-    if (!name) return;
-
-    try {
-        const res = await fetch(`${API}/${id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, phone })
-        });
-
-        const data = await res.json();
-
-        if (res.ok) {
-            bootstrap.Modal.getInstance(document.getElementById('editMemberModal')).hide();
-            loadMembers();
-        } else {
-            alert('❌ ' + (data.error || 'Failed to update member'));
-        }
-    } catch (err) {
-        alert('Network error: ' + err.message);
+    const id = document.getElementById('editMemberId').value;
+    const res = await fetch(`/api/members/${id}`, {
+        method: 'PUT',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+            name:  document.getElementById('editName').value,
+            phone: document.getElementById('editPhone').value,
+        })
+    });
+    const data = await res.json();
+    if (res.ok) {
+        bootstrap.Modal.getInstance(document.getElementById('editMemberModal')).hide();
+        loadMembers();
+    } else {
+        alert(data.error || 'Failed to update member.');
     }
 });
 
-// ── Delete Member ─────────────────────────────────────────────────────────
-document.getElementById('deleteMemberBtn').addEventListener('click', async function() {
+document.getElementById('deleteMemberBtn').addEventListener('click', async () => {
     const id   = document.getElementById('editMemberId').value;
-    const name = document.getElementById('editMemberName').value;
-
-    if (!confirm(`⚠️ Delete "${name}"?\n\nThis will fail if the member has contributions, loans, or penalties on record.`)) return;
-
-    try {
-        const res  = await fetch(`${API}/${id}`, { method: 'DELETE' });
-        const data = await res.json();
-
-        if (res.ok) {
-            bootstrap.Modal.getInstance(document.getElementById('editMemberModal')).hide();
-            loadMembers();
-        } else {
-            alert('❌ ' + (data.error || 'Failed to delete member'));
-        }
-    } catch (err) {
-        alert('Network error: ' + err.message);
+    const name = document.getElementById('editName').value;
+    if (!confirm(`Delete ${name}? This cannot be undone.`)) return;
+    const res = await fetch(`/api/members/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (res.ok) {
+        bootstrap.Modal.getInstance(document.getElementById('editMemberModal')).hide();
+        loadMembers();
+    } else {
+        alert(data.error || 'Failed to delete member.');
     }
 });
 
-// ── Set Member Password ───────────────────────────────────────────────────
-function openSetPasswordModal(memberId, memberName, currentRole) {
-    document.getElementById('passwordMemberId').value = memberId;
-    document.getElementById('passwordMemberName').value = memberName;
-    document.getElementById('memberNewPassword').value = '';
-    document.getElementById('memberConfirmPassword').value = '';
-    document.getElementById('memberAccessRole').value =
-        ['member', 'treasurer', 'admin'].includes(currentRole)
-            ? currentRole
-            : 'member';
-
-    document.getElementById('passwordError').textContent = '';
-    document.getElementById('passwordSuccess').textContent = '';
-    document.getElementById('passwordError').classList.add('d-none');
-    document.getElementById('passwordSuccess').classList.add('d-none');
-
-    const button = document.getElementById('saveMemberPasswordBtn');
-    button.disabled = false;
-    button.innerHTML = '<i class="fas fa-save me-1"></i> Save Access';
-
-    new bootstrap.Modal(document.getElementById('setPasswordModal')).show();
-}
-
-async function saveMemberPassword() {
-    const memberId = document.getElementById('passwordMemberId').value;
-    const password = document.getElementById('memberNewPassword').value;
-    const confirmPassword = document.getElementById('memberConfirmPassword').value;
-    const role = document.getElementById('memberAccessRole').value;
-
-    const errorBox = document.getElementById('passwordError');
-    const successBox = document.getElementById('passwordSuccess');
-    const button = document.getElementById('saveMemberPasswordBtn');
-
-    errorBox.textContent = '';
-    successBox.textContent = '';
-    errorBox.classList.add('d-none');
-    successBox.classList.add('d-none');
-
-    if (!memberId) {
-        errorBox.textContent = 'No member selected.';
-        errorBox.classList.remove('d-none');
-        return;
-    }
-
-    if (!password) {
-        errorBox.textContent = 'Please enter a password.';
-        errorBox.classList.remove('d-none');
-        return;
-    }
-
-    if (password.length < 6) {
-        errorBox.textContent = 'Password must be at least 6 characters.';
-        errorBox.classList.remove('d-none');
-        return;
-    }
-
-    if (password !== confirmPassword) {
-        errorBox.textContent = 'Passwords do not match.';
-        errorBox.classList.remove('d-none');
-        return;
-    }
-
-    if (!['member', 'treasurer', 'admin'].includes(role)) {
-        errorBox.textContent = 'Invalid role selected.';
-        errorBox.classList.remove('d-none');
-        return;
-    }
-
-    try {
-        button.disabled = true;
-        button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
-
-        const res = await fetch('/api/member/set-password', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                member_id: parseInt(memberId, 10),
-                password: password,
-                role: role
-            })
-        });
-
-        const data = await res.json();
-
-        if (!res.ok) {
-            throw new Error(data.error || 'Failed to set member access.');
-        }
-
-        successBox.textContent =
-            data.message || 'Password and role updated successfully.';
-        successBox.classList.remove('d-none');
-
-        document.getElementById('memberNewPassword').value = '';
-        document.getElementById('memberConfirmPassword').value = '';
-
-        button.disabled = false;
-        button.innerHTML = '<i class="fas fa-check me-1"></i> Saved';
-
-        // Refresh the member list so any returned role/status changes are reflected.
-        await loadMembers();
-
-    } catch (err) {
-        console.error(err);
-        errorBox.textContent = err.message || 'Network error. Please try again.';
-        errorBox.classList.remove('d-none');
-
-        button.disabled = false;
-        button.innerHTML = '<i class="fas fa-save me-1"></i> Save Access';
-    }
-}
-
-// ── Init ──────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', loadMembers);
+loadMembers();
 </script>
-
 {% endblock %}

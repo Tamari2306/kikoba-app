@@ -161,7 +161,7 @@ def generate_monthly_bill(db, group_id):
         return
 
     cursor.execute(
-        "SELECT COUNT(*) FROM members WHERE group_id=%s AND is_system=0 AND is_active=1",
+        "SELECT COUNT(*) FROM members WHERE group_id=%s AND is_active=1",
         (group_id,)
     )
     member_count = get_single_value(cursor, 0)
@@ -541,7 +541,7 @@ def get_current_group_profit(db, group_id):
     cursor = get_cursor(db)
     
     cursor.execute(
-        "SELECT COUNT(id) FROM members WHERE group_id = %s AND is_system = 0",
+        "SELECT COUNT(id) FROM members WHERE group_id = %s",
         (group_id,)
     )
     total_members = get_single_value(cursor, 0)
@@ -1193,7 +1193,7 @@ def get_dashboard_data():
 
     cursor = get_cursor(db)
     cursor.execute(
-        "SELECT COUNT(id) FROM members WHERE group_id = %s AND is_system = 0",
+        "SELECT COUNT(id) FROM members WHERE group_id = %s",
         (group_id,)
     )
     total_members = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else None)(cursor.fetchone())
@@ -1206,13 +1206,12 @@ def get_dashboard_data():
     
     cursor.execute(
         """
-        SELECT SUM(amount) 
-        FROM contributions 
-        WHERE group_id = %s 
-          AND member_id != %s
+        SELECT SUM(amount)
+        FROM contributions
+        WHERE group_id = %s
           AND type IN ('hisa anzia', 'hisa', 'jamii')
         """,
-        (group_id, admin_id)
+        (group_id,)
     )
     total_contributions = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
     cursor.close()
@@ -1607,6 +1606,49 @@ def get_my_details():
     return get_member_details(member_id)
 
 
+
+@app.route('/api/member/set-role', methods=['POST'])
+@require_admin
+def set_member_role():
+    """Admin assigns a role to a member without changing password."""
+    db       = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    data      = request.get_json()
+    member_id = data.get("member_id")
+    role      = (data.get("role") or "member").strip().lower()
+
+    if not member_id:
+        return jsonify({"error": "member_id required"}), 400
+    if role not in ("admin", "treasurer", "member"):
+        return jsonify({"error": "Invalid role. Must be admin, treasurer or member."}), 400
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, name, role FROM members WHERE id = %s AND group_id = %s",
+        (member_id, group_id)
+    )
+    member = cursor.fetchone()
+    if not member:
+        cursor.close()
+        return jsonify({"error": "Member not found"}), 404
+
+    try:
+        cursor.execute(
+            "UPDATE members SET role = %s WHERE id = %s AND group_id = %s",
+            (role, member_id, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success",
+                        "message": f"{member['name']} is now {role}."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/member/set-password', methods=['POST'])
 @require_admin
 def set_member_password():
@@ -1616,10 +1658,11 @@ def set_member_password():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
 
-    data = request.get_json()
-    member_id = data.get("member_id")
-    new_password = (data.get("password") or "").strip()
-    role = (data.get("role") or "member").strip()
+    data          = request.get_json()
+    member_id     = data.get("member_id")
+    new_password  = (data.get("password") or "").strip()
+    role          = (data.get("role") or "member").strip()
+    email         = (data.get("email") or "").strip()
 
     if not member_id or not new_password:
         return jsonify({"error": "member_id and password are required"}), 400
@@ -1639,18 +1682,32 @@ def set_member_password():
     if not member:
         cursor.close()
         return jsonify({"error": "Member not found"}), 404
-    if member["is_system"]:
-        cursor.close()
-        return jsonify({"error": "Cannot modify system admin via this route"}), 400
+    # Allow self-update but not downgrading the only admin
+    if member["is_system"] and role != "admin":
+        # Check there's another admin in the group
+        cursor.execute(
+            "SELECT COUNT(*) FROM members WHERE group_id=%s AND role='admin' AND id!=%s",
+            (group_id, member_id)
+        )
+        other_admins = get_single_value(cursor, 0)
+        if not other_admins:
+            cursor.close()
+            return jsonify({"error": "Cannot change role — this is the only admin."}), 400
 
     try:
-        cursor.execute(
-            "UPDATE members SET password = %s, role = %s WHERE id = %s AND group_id = %s",
-            (generate_password_hash(new_password), role, member_id, group_id)
-        )
+        if email:
+            cursor.execute(
+                "UPDATE members SET password = %s, role = %s, email = %s WHERE id = %s AND group_id = %s",
+                (generate_password_hash(new_password), role, email, member_id, group_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE members SET password = %s, role = %s WHERE id = %s AND group_id = %s",
+                (generate_password_hash(new_password), role, member_id, group_id)
+            )
         db.commit()
         cursor.close()
-        return jsonify({"status": "success", "message": "Password and role updated."})
+        return jsonify({"status": "success", "message": "Password, role" + (" and email" if email else "") + " updated."})
     except Exception as e:
         db.rollback()
         cursor.close()
@@ -1951,8 +2008,8 @@ def owner_stats():
             g.id, g.name, g.created_at,
             g.subscription_status, g.subscription_expires,
             g.is_free, g.profits_unlocked,
-            COUNT(m.id) FILTER (WHERE m.is_system = 0) AS member_count,
-            COUNT(m.id) FILTER (WHERE m.is_system = 0 AND m.is_active = 1) AS active_members,
+            COUNT(m.id) AS member_count,
+            COUNT(m.id) FILTER (WHERE m.is_active = 1) AS active_members,
             (SELECT COALESCE(SUM(amount), 0) FROM contributions WHERE group_id = g.id) AS total_contributions,
             (SELECT COALESCE(SUM(principal), 0) FROM loans WHERE group_id = g.id) AS total_loans,
             (SELECT COALESCE(SUM(amount_paid), 0) FROM penalties WHERE group_id = g.id) AS penalties_collected
@@ -2012,7 +2069,7 @@ def owner_group_detail(group_id):
     cursor = get_cursor(db)
 
     cursor.execute("""
-        SELECT g.*, COUNT(m.id) FILTER (WHERE m.is_system=0) AS member_count
+        SELECT g.*, COUNT(m.id) AS member_count
         FROM groups g
         LEFT JOIN members m ON m.group_id = g.id
         WHERE g.id = %s
@@ -2420,14 +2477,29 @@ def login_page():
         cursor = get_cursor(db)
 
         # Find ALL memberships matching phone or email
+        # Normalise phone to try multiple formats
+        phone_variants = [identifier]
+        cleaned = identifier.strip().replace(' ', '').replace('-', '')
+        if cleaned.startswith('+255'):
+            phone_variants += [cleaned[4:], '0' + cleaned[4:], cleaned[1:]]
+        elif cleaned.startswith('255'):
+            phone_variants += ['+' + cleaned, cleaned[3:], '0' + cleaned[3:]]
+        elif cleaned.startswith('0') and len(cleaned) >= 9:
+            phone_variants += ['+255' + cleaned[1:], '255' + cleaned[1:]]
+        # Deduplicate
+        phone_variants = list(dict.fromkeys(phone_variants))
+
         cursor.execute("""
             SELECT m.id, m.name, m.password, m.role, m.is_active,
                    m.group_id, m.is_system, g.name AS group_name
             FROM members m
             JOIN groups g ON g.id = m.group_id
-            WHERE (m.phone = %s OR m.email = %s)
+            WHERE (
+                m.phone = ANY(%s::text[])
+                OR m.email = %s
+            )
             ORDER BY g.name
-        """, (identifier, identifier))
+        """, (phone_variants, identifier))
         matches = cursor.fetchall()
         cursor.close()
 
@@ -2749,23 +2821,16 @@ def get_member_details(member_id):
             "date": p['date']
         })
     
-    # Calculate profit share
-    profit_data = get_current_group_profit(db, group_id)
-    net_profit = profit_data["net_profit_pool"]
-    total_units = get_total_hisa_units(db, group_id)
-    profit_per_unit = net_profit / total_units if total_units > 0 else 0
-    expected_profit_share = round(member_units * profit_per_unit)
-    
-    # Calculate net position
+    # Net position — contributions minus what's owed (no profit assumption,
+    # since profit distribution method is chosen later at cycle end)
     net_contribution_position = (
-        member_total_savings 
+        member_total_savings
         - loan_balances["remaining_loans"]
         - total_penalties_due
     )
-    net_payout = net_contribution_position + expected_profit_share
-    
+
     cursor.close()
-    
+
     return jsonify({
         "member": {
             "id": member['id'],
@@ -2783,9 +2848,7 @@ def get_member_details(member_id):
             "remaining_loans": loan_balances["remaining_loans"],
             "total_overdue": loan_balances["total_overdue"],
             "total_penalties": total_penalties_due,
-            "net_contribution_position": net_contribution_position,
-            "expected_profit_share": expected_profit_share,
-            "net_payout": net_payout
+            "net_contribution_position": net_contribution_position
         },
         "contribution_history": [dict(c) for c in contribution_history],
         "loans": loan_details,
@@ -4480,18 +4543,15 @@ def get_report_data():
     profit_data = get_current_group_profit(db, group_id)
     total_profit = profit_data["net_profit_pool"]
     
-    total_units = get_total_hisa_units(db, group_id)
-    profit_per_unit = total_profit / total_units if total_units > 0 else 0
-    
     admin_id = get_group_admin_member_id(db, group_id)
 
     cursor = get_cursor(db)
     cursor.execute(
-        "SELECT id, name FROM members WHERE group_id = %s AND is_system = 0", 
+        "SELECT id, name FROM members WHERE group_id = %s",
         (group_id,)
     )
     members = cursor.fetchall()
-    
+
     report_data = []
 
     for m in members:
@@ -4521,13 +4581,10 @@ def get_report_data():
         total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
         
         net_contribution_position = (
-            member_total_savings 
+            member_total_savings
             - loan_balances["remaining_loans"]
             - total_penalties_due
         )
-        
-        expected_profit_share = round(member_units * profit_per_unit)
-        net_payout = net_contribution_position + expected_profit_share
 
         report_data.append({
             "member_name": m["name"],
@@ -4541,8 +4598,6 @@ def get_report_data():
             "total_overdue": loan_balances["total_overdue"],
             "total_penalties": total_penalties_due,
             "net_contribution_position": net_contribution_position,
-            "expected_profit_share": expected_profit_share,
-            "net_payout": net_payout,
         })
 
     cursor.close()
