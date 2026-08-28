@@ -1074,7 +1074,7 @@ def signup():
 
         cursor.execute("""
             INSERT INTO members (name, phone, email, password, is_system, role, is_active, joined_date)
-            VALUES (%s, %s, %s, %s, 1, 'admin', 1, CURRENT_DATE)
+            VALUES (%s, %s, %s, %s, 0, 'admin', 1, CURRENT_DATE)
             RETURNING id
         """, (name, phone, email, generate_password_hash(password)))
 
@@ -1135,6 +1135,8 @@ def create_group():
                 generate_monthly_bill(db, group_id)
                 return redirect("/dashboard")
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 error = "Unable to create the Kikoba. Please try again."
 
     return render_template("create_group.html", error=error)
