@@ -3,164 +3,430 @@
 
 <style>
 .stat-card {
-    background: white; border-radius: 10px; padding: 20px;
-    margin-bottom: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+    background: white;
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 15px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
     border: 1px solid #e9ecef;
 }
-.stat-label { color: #6c757d; font-size: 0.85rem; margin-bottom: 4px; font-weight: 500; }
-.stat-value { font-size: 1.4rem; font-weight: bold; color: #667eea; }
-.positive { color: #28a745 !important; }
-.negative { color: #dc3545 !important; }
-.card { margin-bottom: 20px; border: none; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
-.card-header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-weight: 600; }
-.rejesho-sub { background: #f8f9fa; font-size: 0.85rem; }
-.rejesho-sub td { padding: 4px 12px !important; color: #555; }
-.loan-row { cursor: pointer; }
-.loan-row:hover { background: #f0f4ff !important; }
-#error-banner { display: none; }
+
+.stat-label {
+    color: #6c757d;
+    font-size: 0.85rem;
+    margin-bottom: 4px;
+    font-weight: 500;
+}
+
+.stat-value {
+    font-size: 1.4rem;
+    font-weight: bold;
+    color: #667eea;
+}
+
+.positive {
+    color: #28a745 !important;
+}
+
+.negative {
+    color: #dc3545 !important;
+}
+
+.card {
+    margin-bottom: 20px;
+    border: none;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+}
+
+.card-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    font-weight: 600;
+}
+
+.rejesho-sub {
+    background: #f8f9fa;
+    font-size: 0.85rem;
+}
+
+.rejesho-sub td {
+    padding: 4px 12px !important;
+    color: #555;
+}
+
+.loan-row {
+    cursor: pointer;
+}
+
+.loan-row:hover {
+    background: #f0f4ff !important;
+}
+
+#error-banner {
+    display: none;
+}
 </style>
 
-<!-- Error banner (shown instead of alert+redirect) -->
+
+<!-- Error banner -->
 <div id="error-banner" class="alert alert-danger mx-0 mb-3">
-    <strong>Error:</strong> <span id="error-message"></span>
-    <a href="/members-page" class="btn btn-sm btn-outline-danger ms-3">← Back to Members</a>
+    <strong>Error:</strong>
+    <span id="error-message"></span>
+
+    <a href="/members-page" class="btn btn-sm btn-outline-danger ms-3">
+        ← Back to Members
+    </a>
 </div>
 
+
+<!-- Page Header -->
 <div class="d-flex justify-content-between align-items-center mb-4 border-bottom pb-3">
+
     <h1 class="fw-bold text-dark">
         <i class="fas fa-user-circle me-2 text-primary"></i>
         <span id="memberNameTitle">Loading...</span>
     </h1>
+
     <a href="/members-page" class="btn btn-outline-primary">
-        <i class="fas fa-arrow-left me-1"></i> Back to Members
+        <i class="fas fa-arrow-left me-1"></i>
+        Back to Members
     </a>
+
 </div>
+
 
 <!-- Member Info -->
 <div class="card">
+
     <div class="card-header">
-        <h5 class="mb-0" id="memberName"><i class="fas fa-user"></i> Loading...</h5>
+        <h5 class="mb-0" id="memberName">
+            <i class="fas fa-user"></i>
+            Loading...
+        </h5>
     </div>
+
     <div class="card-body">
+
         <div class="row">
-            <div class="col-md-4"><p><strong>Phone:</strong> <span id="memberPhone">—</span></p></div>
-            <div class="col-md-4"><p><strong>Joined:</strong> <span id="memberJoined">—</span></p></div>
-            <div class="col-md-4"><p><strong>Member ID:</strong> <span id="memberId">—</span></p></div>
+
+            <div class="col-md-4">
+                <p>
+                    <strong>Phone:</strong>
+                    <span id="memberPhone">—</span>
+                </p>
+            </div>
+
+            <div class="col-md-4">
+                <p>
+                    <strong>Joined:</strong>
+                    <span id="memberJoined">—</span>
+                </p>
+            </div>
+
+            <div class="col-md-4">
+                <p>
+                    <strong>Member ID:</strong>
+                    <span id="memberId">—</span>
+                </p>
+            </div>
+
         </div>
+
     </div>
 </div>
+
 
 <!-- Financial Summary -->
 <div class="card">
-    <div class="card-header"><h5 class="mb-0"><i class="fas fa-chart-line me-2"></i>Financial Summary</h5></div>
+
+    <div class="card-header">
+        <h5 class="mb-0">
+            <i class="fas fa-chart-line me-2"></i>
+            Financial Summary
+        </h5>
+    </div>
+
     <div class="card-body">
+
+        <!-- Main financial figures -->
         <div class="row">
+
+            <!-- HISA Units -->
             <div class="col-6 col-md-3">
                 <div class="stat-card">
-                    <div class="stat-label">HISA Units</div>
-                    <div class="stat-value" id="hisaUnits">—</div>
+
+                    <div class="stat-label">
+                        HISA Units
+                    </div>
+
+                    <div class="stat-value" id="hisaUnits">
+                        —
+                    </div>
+
                 </div>
             </div>
+
+
+            <!-- Total Savings -->
             <div class="col-6 col-md-3">
                 <div class="stat-card">
-                    <div class="stat-label">Total Savings</div>
-                    <div class="stat-value" id="totalSavings">—</div>
+
+                    <div class="stat-label">
+                        Total Savings
+                    </div>
+
+                    <div class="stat-value" id="totalSavings">
+                        —
+                    </div>
+
                 </div>
             </div>
+
+
+            <!-- Loan Balance -->
             <div class="col-6 col-md-3">
                 <div class="stat-card">
-                    <div class="stat-label">Loan Balance Due</div>
-                    <div class="stat-value negative" id="loanBalance">—</div>
+
+                    <div class="stat-label">
+                        Loan Balance Due
+                    </div>
+
+                    <div class="stat-value negative" id="loanBalance">
+                        —
+                    </div>
+
                 </div>
             </div>
+
+
+            <!-- Net Position -->
             <div class="col-6 col-md-3">
                 <div class="stat-card">
-                    <div class="stat-label">Expected Profit Share</div>
-                    <div class="stat-value positive" id="profitShare">—</div>
+
+                    <div class="stat-label">
+                        Net Position
+                    </div>
+
+                    <div class="stat-value" id="netPosition">
+                        —
+                    </div>
+
                 </div>
             </div>
+
         </div>
+
+
+        <!-- Secondary financial figures -->
         <div class="row">
+
+            <!-- Penalties -->
             <div class="col-6 col-md-4">
                 <div class="stat-card">
-                    <div class="stat-label">Penalties Due</div>
-                    <div class="stat-value negative" id="penaltiesDue">—</div>
+
+                    <div class="stat-label">
+                        Penalties Due
+                    </div>
+
+                    <div class="stat-value negative" id="penaltiesDue">
+                        —
+                    </div>
+
                 </div>
             </div>
+
+
+            <!-- Total Contributions -->
             <div class="col-6 col-md-4">
                 <div class="stat-card">
-                    <div class="stat-label">Net Position</div>
-                    <div class="stat-value" id="netPosition">—</div>
+
+                    <div class="stat-label">
+                        Total Contributions
+                    </div>
+
+                    <div class="stat-value" id="financialTotalContributions">
+                        —
+                    </div>
+
                 </div>
             </div>
+
+
+            <!-- Current Loan Status -->
             <div class="col-6 col-md-4">
                 <div class="stat-card">
-                    <div class="stat-label">Expected Payout</div>
-                    <div class="stat-value" id="netPayout">—</div>
+
+                    <div class="stat-label">
+                        Current Loan Balance
+                    </div>
+
+                    <div class="stat-value negative" id="financialLoanBalance">
+                        —
+                    </div>
+
                 </div>
             </div>
+
         </div>
+
     </div>
 </div>
+
 
 <!-- Contribution Breakdown -->
 <div class="card">
-    <div class="card-header"><h5 class="mb-0"><i class="fas fa-hand-holding-usd me-2"></i>Contribution Breakdown</h5></div>
+
+    <div class="card-header">
+
+        <h5 class="mb-0">
+            <i class="fas fa-hand-holding-usd me-2"></i>
+            Contribution Breakdown
+        </h5>
+
+    </div>
+
     <div class="card-body">
+
         <div class="row text-center">
+
+            <!-- Hisa Anzia -->
             <div class="col-6 col-md-3">
-                <div class="stat-label">Hisa Anzia</div>
-                <div class="fw-bold text-success" id="hisaAnzia">—</div>
+
+                <div class="stat-label">
+                    Hisa Anzia
+                </div>
+
+                <div class="fw-bold text-success" id="hisaAnzia">
+                    —
+                </div>
+
             </div>
+
+
+            <!-- Hisa -->
             <div class="col-6 col-md-3">
-                <div class="stat-label">Hisa</div>
-                <div class="fw-bold text-success" id="hisa">—</div>
+
+                <div class="stat-label">
+                    Hisa
+                </div>
+
+                <div class="fw-bold text-success" id="hisa">
+                    —
+                </div>
+
             </div>
+
+
+            <!-- Jamii -->
             <div class="col-6 col-md-3">
-                <div class="stat-label">Jamii</div>
-                <div class="fw-bold text-success" id="jamii">—</div>
+
+                <div class="stat-label">
+                    Jamii
+                </div>
+
+                <div class="fw-bold text-success" id="jamii">
+                    —
+                </div>
+
             </div>
+
+
+            <!-- Total -->
             <div class="col-6 col-md-3">
-                <div class="stat-label">Total</div>
-                <div class="fw-bold text-primary" id="totalContributions">—</div>
+
+                <div class="stat-label">
+                    Total
+                </div>
+
+                <div class="fw-bold text-primary" id="totalContributions">
+                    —
+                </div>
+
             </div>
+
         </div>
+
     </div>
 </div>
+
 
 <!-- Contribution History -->
 <div class="card">
-    <div class="card-header"><h5 class="mb-0"><i class="fas fa-history me-2"></i>Contribution History</h5></div>
-    <div class="card-body p-0">
-        <div class="table-responsive">
-            <table class="table table-striped table-hover align-middle mb-0">
-                <thead class="table-dark">
-                    <tr>
-                        <th>Date</th><th>Type</th>
-                        <th class="text-end">Amount</th><th>Transaction Date</th>
-                    </tr>
-                </thead>
-                <tbody id="contributionHistoryTable">
-                    <tr><td colspan="4" class="text-center text-muted py-3">Loading...</td></tr>
-                </tbody>
-            </table>
-        </div>
+
+    <div class="card-header">
+
+        <h5 class="mb-0">
+            <i class="fas fa-history me-2"></i>
+            Contribution History
+        </h5>
+
     </div>
+
+    <div class="card-body p-0">
+
+        <div class="table-responsive">
+
+            <table class="table table-striped table-hover align-middle mb-0">
+
+                <thead class="table-dark">
+
+                    <tr>
+                        <th>Date</th>
+                        <th>Type</th>
+                        <th class="text-end">Amount</th>
+                        <th>Transaction Date</th>
+                    </tr>
+
+                </thead>
+
+                <tbody id="contributionHistoryTable">
+
+                    <tr>
+                        <td colspan="4" class="text-center text-muted py-3">
+                            Loading...
+                        </td>
+                    </tr>
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+    </div>
+
 </div>
+
 
 <!-- Loans History -->
 <div class="card">
+
     <div class="card-header">
+
         <h5 class="mb-0">
-            <i class="fas fa-money-bill-wave me-2"></i>Loans &amp; Rejesho History
-            <small class="ms-2 fw-normal opacity-75">(click a loan row to expand rejesho)</small>
+
+            <i class="fas fa-money-bill-wave me-2"></i>
+            Loans &amp; Rejesho History
+
+            <small class="ms-2 fw-normal opacity-75">
+                (click a loan row to expand rejesho)
+            </small>
+
         </h5>
+
     </div>
+
+
     <div class="card-body p-0">
+
         <div class="table-responsive">
+
             <table class="table table-hover align-middle mb-0" id="loansTable">
+
                 <thead class="table-dark">
+
                     <tr>
+
                         <th></th>
                         <th>Start Date</th>
                         <th class="text-end">Principal</th>
@@ -172,258 +438,740 @@
                         <th class="text-end">Remaining</th>
                         <th>Due Date</th>
                         <th>Status</th>
+
                     </tr>
+
                 </thead>
+
+
                 <tbody id="loansTableBody">
-                    <tr><td colspan="11" class="text-center text-muted py-3">Loading...</td></tr>
+
+                    <tr>
+                        <td colspan="11" class="text-center text-muted py-3">
+                            Loading...
+                        </td>
+                    </tr>
+
                 </tbody>
+
             </table>
+
         </div>
+
     </div>
+
 </div>
+
 
 <!-- Penalties -->
 <div class="card">
-    <div class="card-header"><h5 class="mb-0"><i class="fas fa-exclamation-triangle me-2"></i>Penalties</h5></div>
+
+    <div class="card-header">
+
+        <h5 class="mb-0">
+            <i class="fas fa-exclamation-triangle me-2"></i>
+            Penalties
+        </h5>
+
+    </div>
+
+
     <div class="card-body p-0">
+
         <div class="table-responsive">
+
             <table class="table table-striped table-hover align-middle mb-0">
+
                 <thead class="table-dark">
+
                     <tr>
-                        <th>Date</th><th>Type</th>
+
+                        <th>Date</th>
+                        <th>Type</th>
                         <th class="text-end">Amount</th>
                         <th class="text-end">Paid</th>
                         <th class="text-end">Remaining</th>
                         <th>Description</th>
+
                     </tr>
+
                 </thead>
+
+
                 <tbody id="penaltiesTable">
-                    <tr><td colspan="6" class="text-center text-muted py-3">Loading...</td></tr>
+
+                    <tr>
+                        <td colspan="6" class="text-center text-muted py-3">
+                            Loading...
+                        </td>
+                    </tr>
+
                 </tbody>
+
             </table>
+
         </div>
+
     </div>
+
 </div>
 
+
 <script>
-// ── Helpers ──────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
+
 const memberId = {{ member_id | tojson }};
 
+
 function fc(val) {
-    // Null-safe currency formatter — never crashes
+
     const n = parseFloat(val);
-    if (isNaN(n)) return '0 TZS';
-    return n.toLocaleString('en-TZ', {minimumFractionDigits: 0, maximumFractionDigits: 0}) + ' TZS';
+
+    if (isNaN(n)) {
+        return '0 TZS';
+    }
+
+    return n.toLocaleString('en-TZ', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0
+    }) + ' TZS';
 }
+
 
 function safeFixed(val, dp) {
+
     const n = parseFloat(val);
-    return isNaN(n) ? '0.00' : n.toFixed(dp);
+
+    return isNaN(n)
+        ? '0.00'
+        : n.toFixed(dp);
 }
 
+
 function badgeStatus(status) {
-    const map = { Active: 'warning text-dark', Overdue: 'danger', Cleared: 'success', Forgiven: 'info' };
+
+    const map = {
+        Active: 'warning text-dark',
+        Overdue: 'danger',
+        Cleared: 'success',
+        Forgiven: 'info'
+    };
+
     return `<span class="badge bg-${map[status] || 'secondary'}">${status}</span>`;
 }
 
+
 function showError(msg) {
+
     document.getElementById('error-message').textContent = msg;
+
     document.getElementById('error-banner').style.display = 'block';
-    // Clear all loading spinners
-    ['contributionHistoryTable','loansTableBody','penaltiesTable'].forEach(id => {
+
+
+    // Clear all loading areas
+
+    [
+        'contributionHistoryTable',
+        'loansTableBody',
+        'penaltiesTable'
+    ].forEach(function(id) {
+
         const el = document.getElementById(id);
-        if (el) el.innerHTML = `<tr><td colspan="99" class="text-center text-muted">—</td></tr>`;
+
+        if (el) {
+
+            el.innerHTML =
+                `<tr>
+                    <td colspan="99" class="text-center text-muted">
+                        —
+                    </td>
+                </tr>`;
+
+        }
+
     });
+
 }
 
-// ── Main load ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// Main load
+// ─────────────────────────────────────────────────────────────
+
 function loadMemberDetails() {
+
     fetch('/api/members/' + memberId + '/details')
+
         .then(function(response) {
-            // Handle non-200 HTTP status explicitly
+
             if (!response.ok) {
+
                 return response.json().then(function(err) {
-                    throw new Error(err.error || 'Server error ' + response.status);
+
+                    throw new Error(
+                        err.error || 'Server error ' + response.status
+                    );
+
                 });
+
             }
+
             return response.json();
+
         })
+
+
         .then(function(data) {
+
             try {
+
                 renderAll(data);
+
             } catch(renderErr) {
+
                 console.error('Render error:', renderErr);
-                showError('Page rendered with errors: ' + renderErr.message);
+
+                showError(
+                    'Page rendered with errors: ' +
+                    renderErr.message
+                );
+
             }
+
         })
+
+
         .catch(function(err) {
+
             console.error('Fetch error:', err);
-            showError(err.message || 'Could not reach the server. Please try again.');
+
+            showError(
+                err.message ||
+                'Could not reach the server. Please try again.'
+            );
+
         });
+
 }
+
+
+// ─────────────────────────────────────────────────────────────
+// Render everything
+// ─────────────────────────────────────────────────────────────
 
 function renderAll(data) {
-    const member  = data.member  || {};
+
+    const member  = data.member || {};
     const summary = data.summary || {};
     const contrib = summary.contributions || {};
 
-    // ── Member info ──
+
+    // ─────────────────────────────────────────────
+    // Member information
+    // ─────────────────────────────────────────────
+
     const name = member.name || '(unknown)';
-    document.getElementById('memberName').innerHTML      = '<i class="fas fa-user"></i> ' + name;
-    document.getElementById('memberNameTitle').textContent = name + ' — Details';
-    document.getElementById('memberPhone').textContent   = member.phone    || '—';
-    document.getElementById('memberJoined').textContent  = member.joined_date || '—';
-    document.getElementById('memberId').textContent      = member.id       || '—';
 
-    // ── Financial summary ──
-    document.getElementById('hisaUnits').textContent     = safeFixed(summary.hisa_units, 2);
-    document.getElementById('totalSavings').textContent  = fc(summary.total_savings);
-    document.getElementById('loanBalance').textContent   = fc(summary.remaining_loans);
-    document.getElementById('profitShare').textContent   = fc(summary.expected_profit_share);
-    document.getElementById('penaltiesDue').textContent  = fc(summary.total_penalties);
+    document.getElementById('memberName').innerHTML =
+        '<i class="fas fa-user"></i> ' + name;
 
-    const netPos = parseFloat(summary.net_contribution_position) || 0;
-    const netPay = parseFloat(summary.net_payout) || 0;
-    const netPosEl = document.getElementById('netPosition');
-    const netPayEl = document.getElementById('netPayout');
+    document.getElementById('memberNameTitle').textContent =
+        name + ' — Details';
+
+    document.getElementById('memberPhone').textContent =
+        member.phone || '—';
+
+    document.getElementById('memberJoined').textContent =
+        member.joined_date || '—';
+
+    document.getElementById('memberId').textContent =
+        member.id || '—';
+
+
+    // ─────────────────────────────────────────────
+    // Financial summary
+    // ─────────────────────────────────────────────
+
+    document.getElementById('hisaUnits').textContent =
+        safeFixed(summary.hisa_units, 2);
+
+    document.getElementById('totalSavings').textContent =
+        fc(summary.total_savings);
+
+    document.getElementById('loanBalance').textContent =
+        fc(summary.remaining_loans);
+
+    document.getElementById('penaltiesDue').textContent =
+        fc(summary.total_penalties);
+
+
+    // ─────────────────────────────────────────────
+    // Net Position
+    //
+    // Profit calculations are intentionally NOT
+    // included here. Profit will be calculated
+    // separately at the end of the cycle.
+    // ─────────────────────────────────────────────
+
+    const netPos =
+        parseFloat(summary.net_contribution_position) || 0;
+
+    const netPosEl =
+        document.getElementById('netPosition');
+
     netPosEl.textContent = fc(netPos);
-    netPayEl.textContent = fc(netPay);
-    netPosEl.className = 'stat-value ' + (netPos >= 0 ? 'positive' : 'negative');
-    netPayEl.className = 'stat-value ' + (netPay >= 0 ? 'positive' : 'negative');
 
-    // ── Contribution breakdown ──
-    document.getElementById('hisaAnzia').textContent      = fc(contrib['hisa anzia'] || 0);
-    document.getElementById('hisa').textContent           = fc(contrib['hisa']       || 0);
-    document.getElementById('jamii').textContent          = fc(contrib['jamii']      || 0);
-    document.getElementById('totalContributions').textContent = fc(summary.total_contributions);
+    netPosEl.className =
+        'stat-value ' +
+        (netPos >= 0 ? 'positive' : 'negative');
 
-    // ── Contribution history ──
-    const histBody = document.getElementById('contributionHistoryTable');
-    const history  = data.contribution_history || [];
+
+    // ─────────────────────────────────────────────
+    // Additional financial summary
+    // ─────────────────────────────────────────────
+
+    document.getElementById('financialTotalContributions').textContent =
+        fc(summary.total_contributions);
+
+    document.getElementById('financialLoanBalance').textContent =
+        fc(summary.remaining_loans);
+
+
+    // ─────────────────────────────────────────────
+    // Contribution breakdown
+    // ─────────────────────────────────────────────
+
+    document.getElementById('hisaAnzia').textContent =
+        fc(contrib['hisa anzia'] || 0);
+
+    document.getElementById('hisa').textContent =
+        fc(contrib['hisa'] || 0);
+
+    document.getElementById('jamii').textContent =
+        fc(contrib['jamii'] || 0);
+
+    document.getElementById('totalContributions').textContent =
+        fc(summary.total_contributions);
+
+
+    // ─────────────────────────────────────────────
+    // Contribution history
+    // ─────────────────────────────────────────────
+
+    const histBody =
+        document.getElementById('contributionHistoryTable');
+
+    const history =
+        data.contribution_history || [];
+
+
     if (history.length === 0) {
-        histBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No contributions yet</td></tr>';
+
+        histBody.innerHTML =
+            '<tr>' +
+                '<td colspan="4" class="text-center text-muted">' +
+                    'No contributions yet' +
+                '</td>' +
+            '</tr>';
+
     } else {
-        histBody.innerHTML = history.map(function(c) {
-            const typeColor = {
-                hisa: 'primary', 'hisa anzia': 'success', jamii: 'info',
-                rejesho: 'warning', penalty_payment: 'danger',
-            };
-            const badge = `<span class="badge bg-${typeColor[c.type] || 'secondary'}">${c.type}</span>`;
-            return `<tr>
-                <td>${c.date || '—'}</td>
-                <td>${badge}</td>
-                <td class="text-end fw-bold">${fc(c.amount)}</td>
-                <td>${c.transaction_date || c.date || '—'}</td>
-            </tr>`;
-        }).join('');
+
+        histBody.innerHTML =
+            history.map(function(c) {
+
+                const typeColor = {
+
+                    hisa: 'primary',
+                    'hisa anzia': 'success',
+                    jamii: 'info',
+                    rejesho: 'warning',
+                    penalty_payment: 'danger'
+
+                };
+
+                const badge =
+                    `<span class="badge bg-${
+                        typeColor[c.type] || 'secondary'
+                    }">${c.type}</span>`;
+
+
+                return `
+                    <tr>
+
+                        <td>${c.date || '—'}</td>
+
+                        <td>${badge}</td>
+
+                        <td class="text-end fw-bold">
+                            ${fc(c.amount)}
+                        </td>
+
+                        <td>
+                            ${c.transaction_date || c.date || '—'}
+                        </td>
+
+                    </tr>
+                `;
+
+            }).join('');
+
     }
 
-    // ── Loans + rejesho history ──
-    const loansBody = document.getElementById('loansTableBody');
-    const loans     = data.loans || [];
+
+    // ─────────────────────────────────────────────
+    // Loans + Rejesho history
+    // ─────────────────────────────────────────────
+
+    const loansBody =
+        document.getElementById('loansTableBody');
+
+    const loans =
+        data.loans || [];
+
+
     if (loans.length === 0) {
-        loansBody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">No loans taken</td></tr>';
+
+        loansBody.innerHTML =
+            '<tr>' +
+                '<td colspan="11" class="text-center text-muted">' +
+                    'No loans taken' +
+                '</td>' +
+            '</tr>';
+
     } else {
-        loansBody.innerHTML = loans.map(function(l, idx) {
-            const statusBadge = badgeStatus(l.status || 'Active');
-            const monthly = parseFloat(l.monthly_rejesho) || 0;
-            const remaining = parseFloat(l.remaining) || 0;
-            const remClass = remaining > 0 ? 'text-danger fw-bold' : 'text-success';
-            const rowId = 'rejesho-rows-' + idx;
 
-            // Rejesho sub-rows
-            const rejeshoHistory = l.rejesho_history || [];
-            let rejeshoRows = '';
-            if (rejeshoHistory.length > 0) {
-                const subRows = rejeshoHistory.map(function(r, ri) {
-                    return `<tr class="rejesho-sub">
-                        <td></td>
-                        <td colspan="2" class="text-muted ps-4">
-                            <i class="fas fa-arrow-right me-1 text-success" style="font-size:0.7rem"></i>
-                            Payment ${ri + 1} — ${r.date || '—'}
+        loansBody.innerHTML =
+            loans.map(function(l, idx) {
+
+                const statusBadge =
+                    badgeStatus(l.status || 'Active');
+
+                const monthly =
+                    parseFloat(l.monthly_rejesho) || 0;
+
+                const remaining =
+                    parseFloat(l.remaining) || 0;
+
+                const remClass =
+                    remaining > 0
+                        ? 'text-danger fw-bold'
+                        : 'text-success';
+
+                const rowId =
+                    'rejesho-rows-' + idx;
+
+
+                // ─────────────────────────────
+                // Rejesho sub-rows
+                // ─────────────────────────────
+
+                const rejeshoHistory =
+                    l.rejesho_history || [];
+
+                let rejeshoRows = '';
+
+
+                if (rejeshoHistory.length > 0) {
+
+                    rejeshoRows =
+                        rejeshoHistory.map(function(r, ri) {
+
+                            return `
+                                <tr
+                                    class="rejesho-sub"
+                                    id="${rowId}-${ri}"
+                                    style="display:none"
+                                >
+
+                                    <td></td>
+
+                                    <td colspan="2"
+                                        class="ps-4 text-muted">
+
+                                        <i
+                                            class="fas fa-level-up-alt
+                                                   fa-rotate-90
+                                                   me-1 text-success"
+                                            style="font-size:0.7rem"
+                                        ></i>
+
+                                        Payment ${ri + 1}
+
+                                        &nbsp;
+
+                                        <small>
+                                            ${r.date || '—'}
+                                        </small>
+
+                                    </td>
+
+                                    <td
+                                        colspan="5"
+                                        class="text-end fw-bold
+                                               text-success"
+                                    >
+                                        ${fc(r.amount)}
+                                    </td>
+
+                                    <td colspan="3"></td>
+
+                                </tr>
+                            `;
+
+                        }).join('');
+
+                }
+
+
+                const toggleIcon =
+                    rejeshoHistory.length > 0
+
+                        ? `
+                            <i
+                                class="fas fa-chevron-right
+                                       toggle-icon"
+                                id="icon-${idx}"
+                                style="
+                                    font-size:0.75rem;
+                                    transition:transform 0.2s
+                                "
+                            ></i>
+                          `
+
+                        : '';
+
+
+                // ─────────────────────────────
+                // Main loan row
+                // ─────────────────────────────
+
+                const loanRow = `
+
+                    <tr
+                        class="loan-row"
+                        data-idx="${idx}"
+                        data-count="${rejeshoHistory.length}"
+                        onclick="toggleRejesho(
+                            ${idx},
+                            ${rejeshoHistory.length}
+                        )"
+                        style="
+                            cursor:${
+                                rejeshoHistory.length > 0
+                                    ? 'pointer'
+                                    : 'default'
+                            }
+                        "
+                    >
+
+                        <td>
+                            ${toggleIcon}
                         </td>
-                        <td colspan="4" class="text-end text-success fw-bold">${fc(r.amount)}</td>
-                        <td colspan="4"></td>
-                    </tr>`;
-                }).join('');
-                rejeshoRows = `<tr id="${rowId}" style="display:none">${'</tr><tr class="rejesho-sub" style="display:none" id="${rowId}">'.repeat(0)}</tr>`;
-                // Build properly
-                rejeshoRows = rejeshoHistory.map(function(r, ri) {
-                    return `<tr class="rejesho-sub" id="${rowId}-${ri}" style="display:none">
-                        <td></td>
-                        <td colspan="2" class="ps-4 text-muted">
-                            <i class="fas fa-level-up-alt fa-rotate-90 me-1 text-success" style="font-size:0.7rem"></i>
-                            Payment ${ri + 1} &nbsp; <small>${r.date || '—'}</small>
+
+                        <td>
+                            ${l.start_date || '—'}
                         </td>
-                        <td colspan="5" class="text-end fw-bold text-success">${fc(r.amount)}</td>
-                        <td colspan="3"></td>
-                    </tr>`;
-                }).join('');
-            }
 
-            const toggleIcon = rejeshoHistory.length > 0
-                ? `<i class="fas fa-chevron-right toggle-icon" id="icon-${idx}" style="font-size:0.75rem;transition:transform 0.2s"></i>`
-                : '';
+                        <td class="text-end">
+                            ${fc(l.principal)}
+                        </td>
 
-            const loanRow = `<tr class="loan-row${rejeshoHistory.length > 0 ? '' : ''}"
-                    data-idx="${idx}"
-                    data-count="${rejeshoHistory.length}"
-                    onclick="toggleRejesho(${idx}, ${rejeshoHistory.length})"
-                    style="cursor:${rejeshoHistory.length > 0 ? 'pointer' : 'default'}">
-                <td>${toggleIcon}</td>
-                <td>${l.start_date || '—'}</td>
-                <td class="text-end">${fc(l.principal)}</td>
-                <td class="text-end text-danger">${fc(l.interest)}</td>
-                <td class="text-end text-success fw-bold">${fc(l.net_amount)}</td>
-                <td class="text-center">${l.months || '—'}</td>
-                <td class="text-end text-info fw-bold">${fc(monthly)}</td>
-                <td class="text-end text-success">${fc(l.repaid)}</td>
-                <td class="text-end ${remClass}">${fc(remaining)}</td>
-                <td>${l.due_date || '—'}</td>
-                <td>${statusBadge}</td>
-            </tr>`;
+                        <td class="text-end text-danger">
+                            ${fc(l.interest)}
+                        </td>
 
-            return loanRow + rejeshoRows;
-        }).join('');
+                        <td class="text-end text-success fw-bold">
+                            ${fc(l.net_amount)}
+                        </td>
+
+                        <td class="text-center">
+                            ${l.months || '—'}
+                        </td>
+
+                        <td class="text-end text-info fw-bold">
+                            ${fc(monthly)}
+                        </td>
+
+                        <td class="text-end text-success">
+                            ${fc(l.repaid)}
+                        </td>
+
+                        <td class="text-end ${remClass}">
+                            ${fc(remaining)}
+                        </td>
+
+                        <td>
+                            ${l.due_date || '—'}
+                        </td>
+
+                        <td>
+                            ${statusBadge}
+                        </td>
+
+                    </tr>
+
+                `;
+
+
+                return loanRow + rejeshoRows;
+
+            }).join('');
+
     }
 
-    // ── Penalties ──
-    const penBody  = document.getElementById('penaltiesTable');
-    const penalties = data.penalties || [];
+
+    // ─────────────────────────────────────────────
+    // Penalties
+    // ─────────────────────────────────────────────
+
+    const penBody =
+        document.getElementById('penaltiesTable');
+
+    const penalties =
+        data.penalties || [];
+
+
     if (penalties.length === 0) {
-        penBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No penalties</td></tr>';
+
+        penBody.innerHTML =
+            '<tr>' +
+                '<td colspan="6" class="text-center text-muted">' +
+                    'No penalties' +
+                '</td>' +
+            '</tr>';
+
     } else {
-        penBody.innerHTML = penalties.map(function(p) {
-            const remaining = parseFloat(p.remaining) || 0;
-            const isAuto = p.type === 'monthly_rejesho_late';
-            const badge = isAuto
-                ? '<span class="badge bg-danger">Auto Loan</span>'
-                : '<span class="badge bg-warning text-dark">Manual</span>';
-            return `<tr>
-                <td>${p.date || '—'}</td>
-                <td>${badge}</td>
-                <td class="text-end">${fc(p.amount)}</td>
-                <td class="text-end text-success">${fc(p.amount_paid)}</td>
-                <td class="text-end ${remaining > 0 ? 'text-danger fw-bold' : 'text-success'}">${fc(remaining)}</td>
-                <td><small>${p.description || '—'}</small></td>
-            </tr>`;
-        }).join('');
+
+        penBody.innerHTML =
+            penalties.map(function(p) {
+
+                const remaining =
+                    parseFloat(p.remaining) || 0;
+
+                const isAuto =
+                    p.type === 'monthly_rejesho_late';
+
+
+                const badge =
+                    isAuto
+
+                        ? '<span class="badge bg-danger">' +
+                          'Auto Loan' +
+                          '</span>'
+
+                        : '<span class="badge bg-warning text-dark">' +
+                          'Manual' +
+                          '</span>';
+
+
+                return `
+
+                    <tr>
+
+                        <td>
+                            ${p.date || '—'}
+                        </td>
+
+                        <td>
+                            ${badge}
+                        </td>
+
+                        <td class="text-end">
+                            ${fc(p.amount)}
+                        </td>
+
+                        <td class="text-end text-success">
+                            ${fc(p.amount_paid)}
+                        </td>
+
+                        <td
+                            class="text-end ${
+                                remaining > 0
+                                    ? 'text-danger fw-bold'
+                                    : 'text-success'
+                            }"
+                        >
+                            ${fc(remaining)}
+                        </td>
+
+                        <td>
+                            <small>
+                                ${p.description || '—'}
+                            </small>
+                        </td>
+
+                    </tr>
+
+                `;
+
+            }).join('');
+
     }
+
 }
 
-// ── Toggle rejesho sub-rows ───────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// Toggle Rejesho sub-rows
+// ─────────────────────────────────────────────────────────────
+
 function toggleRejesho(idx, count) {
-    if (count === 0) return;
-    const icon = document.getElementById('icon-' + idx);
-    let expanded = icon && icon.style.transform === 'rotate(90deg)';
-    for (let i = 0; i < count; i++) {
-        const row = document.getElementById('rejesho-rows-' + idx + '-' + i);
-        if (row) row.style.display = expanded ? 'none' : '';
+
+    if (count === 0) {
+        return;
     }
-    if (icon) icon.style.transform = expanded ? '' : 'rotate(90deg)';
+
+
+    const icon =
+        document.getElementById('icon-' + idx);
+
+
+    const expanded =
+        icon &&
+        icon.style.transform === 'rotate(90deg)';
+
+
+    for (let i = 0; i < count; i++) {
+
+        const row =
+            document.getElementById(
+                'rejesho-rows-' + idx + '-' + i
+            );
+
+        if (row) {
+
+            row.style.display =
+                expanded ? 'none' : '';
+
+        }
+
+    }
+
+
+    if (icon) {
+
+        icon.style.transform =
+            expanded
+                ? ''
+                : 'rotate(90deg)';
+
+    }
+
 }
 
-document.addEventListener('DOMContentLoaded', loadMemberDetails);
+
+// ─────────────────────────────────────────────────────────────
+// Start
+// ─────────────────────────────────────────────────────────────
+
+document.addEventListener(
+    'DOMContentLoaded',
+    loadMemberDetails
+);
+
 </script>
 
 {% endblock %}
