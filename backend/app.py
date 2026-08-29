@@ -489,22 +489,27 @@ def get_member_hisa_units(db, member_id, group_id):
 
 def get_total_hisa_units(db, group_id):
     settings = get_group_settings(db, group_id)
+
     unit_price = float(settings.get('hisa_unit_price', 5000))
-    admin_id = get_group_admin_member_id(db, group_id)
-    
+
     cursor = get_cursor(db)
+
     cursor.execute(
         """
-        SELECT SUM(amount) 
-        FROM contributions 
-        WHERE group_id = %s AND type IN ('hisa') AND member_id != %s
+        SELECT COALESCE(SUM(amount), 0)
+        FROM contributions
+        WHERE group_id = %s
+          AND type = 'hisa'
         """,
-        (group_id, admin_id)
+        (group_id,)
     )
-    total_hisa = get_single_value(cursor, 0)
+
+    total_hisa = get_single_value(cursor, 0) or 0
+
     cursor.close()
-    
-    units = total_hisa / unit_price if unit_price > 0 else 0
+
+    units = float(total_hisa) / unit_price if unit_price > 0 else 0
+
     return units
 
 
