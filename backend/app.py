@@ -326,12 +326,19 @@ def is_own_member_data(member_id):
 
 
 def get_group_admin_member_id(db, group_id):
+    """
+    Returns the member_id of the group's admin (role='admin').
+    is_system is reserved for the platform owner only and is never
+    tied to a specific group's admin.
+    """
     cursor = get_cursor(db)
     cursor.execute(
         """
         SELECT id
         FROM members
-        WHERE group_id = %s AND is_system = 1
+        WHERE group_id = %s AND role = 'admin'
+        ORDER BY id ASC
+        LIMIT 1
         """,
         (group_id,)
     )
@@ -339,7 +346,7 @@ def get_group_admin_member_id(db, group_id):
     cursor.close()
 
     if not row:
-        raise Exception(f"No system admin member found for group_id={group_id}")
+        raise Exception(f"No admin member found for group_id={group_id}")
 
     return row["id"]
 
@@ -1135,8 +1142,6 @@ def create_group():
                 generate_monthly_bill(db, group_id)
                 return redirect("/dashboard")
             except Exception as e:
-                import traceback
-                traceback.print_exc()
                 error = "Unable to create the Kikoba. Please try again."
 
     return render_template("create_group.html", error=error)
@@ -2868,7 +2873,7 @@ def get_members():
     
     cursor = get_cursor(db)
     cursor.execute(
-        "SELECT * FROM members WHERE group_id = %s ORDER BY is_system DESC, id ASC", 
+        "SELECT * FROM members WHERE group_id = %s ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'treasurer' THEN 1 ELSE 2 END, id ASC", 
         (group_id,)
     )
     members = cursor.fetchall()
@@ -2909,7 +2914,16 @@ def get_members():
         GROUP BY member_id
     """, (group_id,))
     penalties_map = {row['member_id']: row['total_penalties'] for row in cursor.fetchall()}
-    
+
+    # PRE-FETCH hisa-only contributions (for correct HISA units — matches member details page)
+    cursor.execute("""
+        SELECT member_id, SUM(amount) as total_hisa
+        FROM contributions
+        WHERE group_id = %s AND type = 'hisa'
+        GROUP BY member_id
+    """, (group_id,))
+    hisa_only_map = {row['member_id']: row['total_hisa'] for row in cursor.fetchall()}
+
     cursor.close()
     
     result = []
@@ -2923,9 +2937,10 @@ def get_members():
         total_loans = loans_map.get(member_id, 0)
         total_rejesho = rejesho_map.get(member_id, 0)
         total_penalties = penalties_map.get(member_id, 0)
-        
-        # Calculate HISA units (simplified)
-        hisa_units = total_contributions / unit_price if unit_price > 0 else 0
+        total_hisa_only = hisa_only_map.get(member_id, 0)
+
+        # HISA units use ONLY 'hisa' type contributions (matches member details page)
+        hisa_units = total_hisa_only / unit_price if unit_price > 0 else 0
         remaining_loans = max(total_loans - total_rejesho, 0)
 
         result.append({
@@ -4541,10 +4556,7 @@ def get_report_data():
     
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
-    
-    profit_data = get_current_group_profit(db, group_id)
-    total_profit = profit_data["net_profit_pool"]
-    
+
     admin_id = get_group_admin_member_id(db, group_id)
 
     cursor = get_cursor(db)
