@@ -1,90 +1,157 @@
 {% extends "base.html" %}
+
 {% block content %}
+
 <div class="container-fluid py-4">
+
+    <!-- Page Header -->
     <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2 class="text-success mb-0">📊 Monthly Group Report</h2>
+        <h2 class="text-success mb-0">
+            📊 Monthly Group Report
+        </h2>
+
         <button id="download-pdf" class="btn btn-success">
-            <i class="bi bi-download me-1"></i> Download PDF
+            <i class="bi bi-download me-1"></i>
+            Download PDF
         </button>
     </div>
 
+
     <!-- Summary Cards -->
     <div class="row mb-4 g-3">
+
         <div class="col-lg-3 col-md-6">
             <div class="card shadow-sm text-white bg-primary h-100">
                 <div class="card-body d-flex align-items-center justify-content-between">
                     <div>
                         <h6 class="card-title mb-1">Total Contributions</h6>
-                        <h3 id="total-contributions" class="fw-bold">0 TZS</h3>
+                        <h3 id="total-contributions" class="fw-bold">
+                            0 TZS
+                        </h3>
                     </div>
+
                     <i class="bi bi-cash-stack fs-1 opacity-50"></i>
                 </div>
             </div>
         </div>
+
+
         <div class="col-lg-3 col-md-6">
             <div class="card shadow-sm text-dark bg-warning h-100">
                 <div class="card-body d-flex align-items-center justify-content-between">
                     <div>
                         <h6 class="card-title mb-1">Total Loans Taken</h6>
-                        <h3 id="total-loans" class="fw-bold">0 TZS</h3>
+                        <h3 id="total-loans" class="fw-bold">
+                            0 TZS
+                        </h3>
                     </div>
+
                     <i class="bi bi-wallet2 fs-1 opacity-50"></i>
                 </div>
             </div>
         </div>
+
+
         <div class="col-lg-3 col-md-6">
             <div class="card shadow-sm text-white bg-danger h-100">
                 <div class="card-body d-flex align-items-center justify-content-between">
                     <div>
                         <h6 class="card-title mb-1">Total Penalties</h6>
-                        <h3 id="total-penalties" class="fw-bold">0 TZS</h3>
+                        <h3 id="total-penalties" class="fw-bold">
+                            0 TZS
+                        </h3>
                     </div>
+
                     <i class="bi bi-exclamation-triangle fs-1 opacity-50"></i>
                 </div>
             </div>
         </div>
+
+
         <div class="col-lg-3 col-md-6">
             <div class="card shadow-sm text-white bg-success h-100">
                 <div class="card-body d-flex align-items-center justify-content-between">
                     <div>
                         <h6 class="card-title mb-1">Total Loans Due</h6>
-                        <h3 id="total-loans-due" class="fw-bold">0 TZS</h3>
+                        <h3 id="total-loans-due" class="fw-bold">
+                            0 TZS
+                        </h3>
                     </div>
+
                     <i class="bi bi-clock-history fs-1 opacity-50"></i>
                 </div>
             </div>
         </div>
+
     </div>
+
 
     <!-- Top Contributors & Largest Loaners -->
     <div class="row mb-4 g-3">
+
         <div class="col-lg-6 col-md-6">
             <div class="card shadow-sm p-3 h-100">
-                <h6 class="fw-bold mb-3 text-primary"><i class="bi bi-star-fill me-2"></i>Top Contributors</h6>
+
+                <h6 class="fw-bold mb-3 text-primary">
+                    <i class="bi bi-star-fill me-2"></i>
+                    Top Contributors
+                </h6>
+
                 <ul id="top-contributors" class="list-group list-group-flush"></ul>
+
             </div>
         </div>
+
+
         <div class="col-lg-6 col-md-6">
             <div class="card shadow-sm p-3 h-100">
-                <h6 class="fw-bold mb-3 text-warning"><i class="bi bi-wallet2 me-2"></i>Largest Loaners</h6>
+
+                <h6 class="fw-bold mb-3 text-warning">
+                    <i class="bi bi-wallet2 me-2"></i>
+                    Largest Loaners
+                </h6>
+
                 <ul id="largest-loans" class="list-group list-group-flush"></ul>
+
             </div>
         </div>
+
     </div>
 
-    <div class="alert alert-info">
-    <strong>ℹ️ Note:</strong> 
-    <ul class="mb-0">
-        <li><strong>Total Contributions:</strong> Includes all member contributions (Hisa Anzia + Hisa + Jamii + Penalty Payments)</li>
-        <li><strong>Total Savings:</strong> Only includes Hisa Anzia + Hisa + Jamii (money to be returned at cycle end)</li>
-    </ul>
-</div>
 
-    <!-- Table -->
+    <!-- Information Note -->
+    <div class="alert alert-info">
+
+        <strong>ℹ️ Note:</strong>
+
+        <ul class="mb-0">
+
+            <li>
+                <strong>Total Contributions:</strong>
+                Includes all member contributions
+                (Hisa Anzia + Hisa + Jamii + Penalty Payments)
+            </li>
+
+            <li>
+                <strong>Total Savings:</strong>
+                Only includes Hisa Anzia + Hisa + Jamii
+                (money to be returned at cycle end)
+            </li>
+
+        </ul>
+
+    </div>
+
+
+    <!-- Report Table -->
     <div class="card shadow-sm p-3">
+
         <div class="table-responsive">
+
             <table class="table table-hover align-middle" id="report-table">
+
                 <thead class="table-success">
+
                     <tr>
                         <th>Member</th>
                         <th class="text-end">HISA Units</th>
@@ -101,93 +168,371 @@
                         <th class="text-end">Profit %</th>
                         <th class="text-end table-success fw-bold">Net Payout</th>
                     </tr>
+
                 </thead>
-                <tbody></tbody>
+
+                <tbody id="report-body">
+
+                    <!-- JavaScript inserts rows here -->
+
+                </tbody>
+
             </table>
+
         </div>
+
     </div>
+
 </div>
 
+
 <script>
+
 const API_REPORT = "/api/reports";
 const API_DOWNLOAD = "/reports-page/download";
 
+
 async function loadReport() {
-    const res = await fetch(API_REPORT);
-    const data = await res.json();
-    const tbody = document.querySelector("#report-table tbody");
-    tbody.innerHTML = "";
 
-    let totalContributions = 0;
-    let totalLoans = 0;
-    let totalPenalties = 0;
-    let totalProfitShare = 0;
-    let totalLoansDue = 0;
+    const tbody = document.querySelector("#report-body");
 
-    const totalProfit = data.report.reduce((sum, m) => sum + m.expected_profit_share, 0);
+    try {
 
-    // Clear top lists
-    const topContributors = document.getElementById("top-contributors");
-    const largestLoans = document.getElementById("largest-loans");
-    topContributors.innerHTML = "";
-    largestLoans.innerHTML = "";
+        // Show loading state
+        tbody.innerHTML = `
+            <tr>
+                <td colspan="14" class="text-center py-4">
+                    <div class="spinner-border text-success me-2" role="status"></div>
+                    Loading report...
+                </td>
+            </tr>
+        `;
 
-    // Top 3
-    const top3Contributors = [...data.report].sort((a,b) => b.total_contributions - a.total_contributions).slice(0,3);
-    const top3Loans = [...data.report].sort((a,b) => b.total_loans - a.total_loans).slice(0,3);
 
-    top3Contributors.forEach((m,i) => {
-        topContributors.innerHTML += `<li class="list-group-item d-flex justify-content-between align-items-center">
-            ${i+1}. ${m.member_name}
-            <span class="badge bg-primary rounded-pill">${m.total_contributions.toLocaleString()} TZS</span>
-        </li>`;
-    });
+        const res = await fetch(API_REPORT);
 
-    top3Loans.forEach((m,i) => {
-        largestLoans.innerHTML += `<li class="list-group-item d-flex justify-content-between align-items-center">
-            ${i+1}. ${m.member_name}
-            <span class="badge bg-warning rounded-pill">${m.total_loans.toLocaleString()} TZS</span>
-        </li>`;
-    });
 
-    data.report.forEach(m => {
-        const profitPercent = totalProfit > 0 ? ((m.expected_profit_share / totalProfit) * 100).toFixed(1) : 0;
+        // Check HTTP response
+        if (!res.ok) {
 
-        tbody.innerHTML += `<tr>
-        <td class="fw-bold">${m.member_name}</td>
-        <td class="text-end">${m.hisa_units.toFixed(2)}</td>
-        <td class="text-end">${(m.contributions['hisa anzia'] || 0).toLocaleString()} TZS</td>
-        <td class="text-end">${(m.contributions['hisa'] || 0).toLocaleString()} TZS</td>
-        <td class="text-end">${(m.contributions['jamii'] || 0).toLocaleString()} TZS</td>
-        <td class="text-end fw-bold">${m.total_savings.toLocaleString()} TZS</td>
-        <td class="text-end">${m.total_loans.toLocaleString()} TZS</td>
-        <td class="text-end">${m.total_rejesho.toLocaleString()} TZS</td>
-        <td class="text-end text-danger">${m.remaining_loans.toLocaleString()} TZS</td>
-        <td class="text-end">${m.total_penalties.toLocaleString()} TZS</td>
-        <td class="text-end table-warning fw-bold">${m.net_contribution_position.toLocaleString()} TZS</td> 
-        <td class="text-end table-info fw-bold">${m.expected_profit_share.toLocaleString()} TZS</td>
-        <td class="text-end text-success fw-bold">${profitPercent}%</td>
-        <td class="text-end table-success fw-bold">${m.net_payout.toLocaleString()} TZS</td>
-    </tr>`;
+            throw new Error(
+                `Report API returned ${res.status} ${res.statusText}`
+            );
 
-        totalContributions += m.total_contributions;
-        totalLoans += m.total_loans;
-        totalLoansDue += m.remaining_loans;
-        totalPenalties += m.total_penalties;
-        totalProfitShare += m.expected_profit_share;
-    });
+        }
 
-    // Update summary cards
-    document.getElementById("total-contributions").innerText = totalContributions.toLocaleString() + " TZS";
-    document.getElementById("total-loans").innerText = totalLoans.toLocaleString() + " TZS";
-    document.getElementById("total-loans-due").innerText = totalLoansDue.toLocaleString() + " TZS";
-    document.getElementById("total-penalties").innerText = totalPenalties.toLocaleString() + " TZS";
+
+        const data = await res.json();
+
+
+        console.log("REPORT API RESPONSE:", data);
+
+
+        // Make sure report exists
+        if (!data || !Array.isArray(data.report)) {
+
+            throw new Error(
+                "Invalid report response: 'report' array is missing."
+            );
+
+        }
+
+
+        // Clear loading state
+        tbody.innerHTML = "";
+
+
+        let totalContributions = 0;
+        let totalLoans = 0;
+        let totalPenalties = 0;
+        let totalProfitShare = 0;
+        let totalLoansDue = 0;
+
+
+        // Safely calculate total profit
+        const totalProfit = data.report.reduce(
+            (sum, m) => sum + Number(m.expected_profit_share || 0),
+            0
+        );
+
+
+        // Top Contributors
+        const topContributors =
+            document.getElementById("top-contributors");
+
+        const largestLoans =
+            document.getElementById("largest-loans");
+
+
+        topContributors.innerHTML = "";
+        largestLoans.innerHTML = "";
+
+
+        // Top 3 Contributors
+        const top3Contributors = [...data.report]
+            .sort(
+                (a, b) =>
+                    Number(b.total_contributions || 0) -
+                    Number(a.total_contributions || 0)
+            )
+            .slice(0, 3);
+
+
+        top3Contributors.forEach((m, i) => {
+
+            topContributors.innerHTML += `
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+
+                    ${i + 1}. ${m.member_name || "Unknown Member"}
+
+                    <span class="badge bg-primary rounded-pill">
+                        ${Number(m.total_contributions || 0).toLocaleString()} TZS
+                    </span>
+
+                </li>
+            `;
+
+        });
+
+
+        // Top 3 Loaners
+        const top3Loans = [...data.report]
+            .sort(
+                (a, b) =>
+                    Number(b.total_loans || 0) -
+                    Number(a.total_loans || 0)
+            )
+            .slice(0, 3);
+
+
+        top3Loans.forEach((m, i) => {
+
+            largestLoans.innerHTML += `
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+
+                    ${i + 1}. ${m.member_name || "Unknown Member"}
+
+                    <span class="badge bg-warning rounded-pill">
+                        ${Number(m.total_loans || 0).toLocaleString()} TZS
+                    </span>
+
+                </li>
+            `;
+
+        });
+
+
+        // If no members
+        if (data.report.length === 0) {
+
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="14" class="text-center text-muted py-4">
+                        No report data available.
+                    </td>
+                </tr>
+            `;
+
+        }
+
+
+        // Build table
+        data.report.forEach(m => {
+
+            const contributions = m.contributions || {};
+
+
+            const hisaUnits =
+                Number(m.hisa_units || 0);
+
+            const hisaAnzia =
+                Number(contributions["hisa anzia"] || 0);
+
+            const hisa =
+                Number(contributions["hisa"] || 0);
+
+            const jamii =
+                Number(contributions["jamii"] || 0);
+
+            const totalSavings =
+                Number(m.total_savings || 0);
+
+            const totalLoansMember =
+                Number(m.total_loans || 0);
+
+            const totalRejesho =
+                Number(m.total_rejesho || 0);
+
+            const remainingLoans =
+                Number(m.remaining_loans || 0);
+
+            const penalties =
+                Number(m.total_penalties || 0);
+
+            const netPosition =
+                Number(m.net_contribution_position || 0);
+
+            const profitShare =
+                Number(m.expected_profit_share || 0);
+
+            const netPayout =
+                Number(m.net_payout || 0);
+
+
+            const profitPercent =
+                totalProfit > 0
+                    ? ((profitShare / totalProfit) * 100).toFixed(1)
+                    : "0.0";
+
+
+            tbody.innerHTML += `
+
+                <tr>
+
+                    <td class="fw-bold">
+                        ${m.member_name || "Unknown Member"}
+                    </td>
+
+                    <td class="text-end">
+                        ${hisaUnits.toFixed(2)}
+                    </td>
+
+                    <td class="text-end">
+                        ${hisaAnzia.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end">
+                        ${hisa.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end">
+                        ${jamii.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end fw-bold">
+                        ${totalSavings.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end">
+                        ${totalLoansMember.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end">
+                        ${totalRejesho.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end text-danger">
+                        ${remainingLoans.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end">
+                        ${penalties.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end table-warning fw-bold">
+                        ${netPosition.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end table-info fw-bold">
+                        ${profitShare.toLocaleString()} TZS
+                    </td>
+
+                    <td class="text-end text-success fw-bold">
+                        ${profitPercent}%
+                    </td>
+
+                    <td class="text-end table-success fw-bold">
+                        ${netPayout.toLocaleString()} TZS
+                    </td>
+
+                </tr>
+
+            `;
+
+
+            // Summary totals
+            totalContributions +=
+                Number(m.total_contributions || 0);
+
+            totalLoans +=
+                totalLoansMember;
+
+            totalLoansDue +=
+                remainingLoans;
+
+            totalPenalties +=
+                penalties;
+
+            totalProfitShare +=
+                profitShare;
+
+        });
+
+
+        // Update summary cards
+
+        document.getElementById("total-contributions").innerText =
+            totalContributions.toLocaleString() + " TZS";
+
+        document.getElementById("total-loans").innerText =
+            totalLoans.toLocaleString() + " TZS";
+
+        document.getElementById("total-loans-due").innerText =
+            totalLoansDue.toLocaleString() + " TZS";
+
+        document.getElementById("total-penalties").innerText =
+            totalPenalties.toLocaleString() + " TZS";
+
+
+    } catch (error) {
+
+        console.error("REPORT LOADING ERROR:", error);
+
+
+        tbody.innerHTML = `
+
+            <tr>
+
+                <td colspan="14" class="text-center py-5">
+
+                    <div class="alert alert-danger mb-0">
+
+                        <strong>Unable to load report.</strong>
+
+                        <br>
+
+                        <small>
+                            ${error.message}
+                        </small>
+
+                    </div>
+
+                </td>
+
+            </tr>
+
+        `;
+
+    }
+
 }
 
-document.getElementById("download-pdf").addEventListener("click", () => {
-    window.location.href = API_DOWNLOAD;
-});
+
+// Download PDF
+
+document
+    .getElementById("download-pdf")
+    .addEventListener("click", () => {
+
+        window.location.href = API_DOWNLOAD;
+
+    });
+
+
+// Load report
 
 loadReport();
+
 </script>
+
 {% endblock %}
