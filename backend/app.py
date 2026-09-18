@@ -844,42 +844,17 @@ def auto_insert_loan_penalties(db, group_id):
                     coverage_date = pdate
                     break
 
-            MERCY_THRESHOLD = 0.90
-
-            # How much of THIS slot paid (cumulative minus previous slots)
-            cumul_all      = sum(a for a, _ in payments)
-            prev_target    = monthly_rejesho * (month_num - 1)
-            this_slot_paid = max(0.0, min(cumul_all, target) - prev_target)
-            pct_paid       = min(1.0, this_slot_paid / monthly_rejesho) if monthly_rejesho > 0 else 1.0
-
-            # How much of this slot was paid BEFORE the deadline
-            paid_by_due_slot = max(0.0, min(paid_by_due, target) - prev_target)
-            before_pct = min(1.0, paid_by_due_slot / monthly_rejesho) if monthly_rejesho > 0 else 1.0
-
-            # ── MERCY: ≥90% paid BEFORE deadline → no penalty at all ──
-            if before_pct >= MERCY_THRESHOLD:
-                if existing and existing['amount'] == 0:
-                    cursor.execute("DELETE FROM penalties WHERE id = %s", (existing['id'],))
-                continue
-
-            HALF_RATE_THRESHOLD = 0.70
-
+            # ── FLAT RATE — no mercy thresholds of any kind ──
+            # Anything not fully covered by the due date is late, full stop.
+            # The rate is per-day-overdue, not scaled by how much was paid.
             if coverage_date is not None:
-                # Covered fully (late) → freeze at full daily rate
-                # Penalty was accruing at full rate before payment, so keep it
+                # Covered fully, but after the due date -> flat rate, frozen
+                # for good (never touched again once frozen).
                 freeze_days    = (coverage_date - month_due_date).days
                 penalty_amount = max(0, round(freeze_days * daily_penalty))
                 should_freeze  = True
-            elif pct_paid >= MERCY_THRESHOLD:
-                # ≥90% paid after deadline but not 100% yet → freeze at full rate
-                penalty_amount = round(days_late_today * daily_penalty)
-                should_freeze  = True
-            elif pct_paid >= HALF_RATE_THRESHOLD:
-                # ≥75% but <90% paid → still accruing but at half rate (500/day)
-                penalty_amount = round(days_late_today * (daily_penalty / 2.0))
-                should_freeze  = False
             else:
-                # Below 75% → full rate accruing
+                # Not yet fully covered -> flat rate, still accruing daily
                 penalty_amount = round(days_late_today * daily_penalty)
                 should_freeze  = False
 

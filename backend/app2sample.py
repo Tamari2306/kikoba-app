@@ -34,6 +34,32 @@ env = os.environ.get('FLASK_ENV', 'development')
 # Initialize CORS
 CORS(app, origins=app.config['CORS_ORIGINS'])
 
+# ── Supabase config ───────────────────────────────────────────────────
+SUPABASE_URL  = os.environ.get("SUPABASE_URL", "")
+SUPABASE_ANON = os.environ.get("SUPABASE_ANON_KEY", "")
+
+# ── Email / Password Reset ────────────────────────────────────────────
+app.config["MAIL_SERVER"]         = os.environ.get("MAIL_SERVER",   "smtp.gmail.com")
+app.config["MAIL_PORT"]           = int(os.environ.get("MAIL_PORT", 587))
+app.config["MAIL_USE_TLS"]        = True
+app.config["MAIL_USERNAME"]       = os.environ.get("MAIL_USERNAME", "")
+app.config["MAIL_PASSWORD"]       = os.environ.get("MAIL_PASSWORD", "")
+app.config["MAIL_DEFAULT_SENDER"] = os.environ.get("MAIL_USERNAME", "noreply@kikoba.app")
+# Mail initialized lazily — only when MAIL_USERNAME is configured
+mail = None
+ts   = None  # Supabase Auth handles password reset tokens
+
+def get_mail():
+    """Return mail instance, initializing only if credentials are set."""
+    global mail
+    if not MAIL_AVAILABLE:
+        return None
+    if app.config.get("MAIL_USERNAME"):
+        if mail is None:
+            mail = Mail(app)
+        return mail
+    return None
+
 # Initialize database teardown
 init_db_app(app)
 
@@ -60,10 +86,192 @@ def get_current_group_id():
     """Extract group_id from session, default to None"""
     return session.get("group_id")
 
+# ==================== SUBSCRIPTION CONSTANTS & HELPERS ====================
+
+RATE_PER_MEMBER = 1000  # TZS per member per month
+GRACE_DAYS      = 7
+
+
+def get_group_subscription_status(db, group_id):
+    """
+    Returns dict: status (active|free|grace|suspended), days_remaining, is_free
+    """
+    cursor = get_cursor(db)
+    cursor.execute(
+        """SELECT subscription_status, subscription_expires,
+                  grace_until, is_free
+           FROM groups WHERE id = %s""",
+        (group_id,)
+    )
+    row = cursor.fetchone()
+    cursor.close()
+
+    if not row:
+        return {"status": "active", "is_free": False, "days_remaining": 999}
+
+    is_free   = bool(row.get("is_free", 0))
+    status    = row.get("subscription_status") or "active"
+    expires   = row.get("subscription_expires")
+    grace_end = row.get("grace_until")
+    today     = date.today()
+
+    if is_free or status == "free":
+        return {"status": "free", "is_free": True, "days_remaining": 999,
+                "grace_until": None}
+
+    if expires is None:
+        return {"status": "active", "is_free": False, "days_remaining": 999,
+                "grace_until": None}
+
+    if isinstance(expires, str):
+        expires = datetime.strptime(expires[:10], "%Y-%m-%d").date()
+    if isinstance(grace_end, str):
+        grace_end = datetime.strptime(grace_end[:10], "%Y-%m-%d").date()
+
+    days_remaining = (expires - today).days
+
+    if days_remaining >= 0:
+        return {"status": "active", "is_free": False,
+                "days_remaining": days_remaining, "grace_until": grace_end}
+
+    if grace_end and today <= grace_end:
+        return {"status": "grace", "is_free": False,
+                "days_remaining": (grace_end - today).days,
+                "grace_until": grace_end}
+
+    return {"status": "suspended", "is_free": False,
+            "days_remaining": days_remaining, "grace_until": grace_end}
+
+
+def generate_monthly_bill(db, group_id):
+    """Generate a subscription record for the current month if one doesn't exist."""
+    today        = date.today()
+    period_start = today.replace(day=1)
+    import calendar as _cal
+    last_day   = _cal.monthrange(today.year, today.month)[1]
+    period_end = today.replace(day=last_day)
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id FROM subscriptions WHERE group_id=%s AND period_start=%s",
+        (group_id, period_start)
+    )
+    if cursor.fetchone():
+        cursor.close()
+        return
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM members WHERE group_id=%s AND is_active=1",
+        (group_id,)
+    )
+    member_count = get_single_value(cursor, 0)
+
+    cursor.execute("SELECT COALESCE(is_free,0) FROM groups WHERE id=%s", (group_id,))
+    row = cursor.fetchone()
+    is_free = bool(list(row.values())[0]) if row else False
+
+    amount_due = 0 if is_free else int(member_count) * RATE_PER_MEMBER
+    status     = "free" if is_free else "unpaid"
+
+    try:
+        cursor.execute(
+            """INSERT INTO subscriptions
+               (group_id, period_start, period_end, member_count, amount_due, status)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT (group_id, period_start) DO NOTHING""",
+            (group_id, period_start, period_end, member_count, amount_due, status)
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"generate_monthly_bill error: {e}")
+    finally:
+        cursor.close()
+
+
+def check_subscription_access(group_id, role, db=None):
+    """
+    Returns (allowed: bool, read_only: bool, message: str|None)
+    """
+    if db is None:
+        db = get_db()
+    sub    = get_group_subscription_status(db, group_id)
+    status = sub["status"]
+
+    if status in ("active", "free"):
+        return True, False, None
+
+    if status == "grace":
+        msg = (f"⚠️ Subscription expires in {sub['days_remaining']} day(s). "
+               f"Please pay to continue uninterrupted access.")
+        return True, False, msg
+
+    if status == "suspended":
+        if role == "admin":
+            return True, True, "🔒 Subscription suspended. Read-only access. Contact support to renew."
+        return False, False, "🔒 Group subscription has expired. Contact your admin."
+
+    return True, False, None
+
+
+
 
 # ==================== ROLE-BASED ACCESS CONTROL ====================
 
 from functools import wraps
+try:
+    from auth import (
+        get_current_user, get_all_memberships,
+        require_auth,
+        require_member as require_any_member_supabase,
+        require_treasurer as require_treasurer_or_above_supabase,
+        require_admin as require_admin_supabase,
+        verify_supabase_jwt
+    )
+    SUPABASE_AUTH_ENABLED = True
+except ImportError as e:
+    print(f"⚠️  auth.py not found or error: {e} — Supabase Auth disabled")
+    SUPABASE_AUTH_ENABLED = False
+    def get_current_user(): return None
+    def get_all_memberships(uid): return []
+    def verify_supabase_jwt(t): return None
+    def require_any_member_supabase(f): return f
+    def require_treasurer_or_above_supabase(f): return f
+    def require_admin_supabase(f): return f
+
+try:
+    from notifications import (
+        send_password_reset_email, send_welcome_email,
+        send_sms, send_loan_due_reminder, send_penalty_started_sms,
+        send_subscription_reminder_sms
+    )
+    NOTIFICATIONS_ENABLED = True
+except ImportError as e:
+    print(f"⚠️  notifications.py not found or error: {e} — notifications disabled")
+    NOTIFICATIONS_ENABLED = False
+    def send_password_reset_email(*a, **k): return False
+    def send_welcome_email(*a, **k): return False
+    def send_sms(*a, **k): return False
+    def send_loan_due_reminder(*a, **k): return False
+    def send_penalty_started_sms(*a, **k): return False
+    def send_subscription_reminder_sms(*a, **k): return False
+try:
+    from flask_mail import Mail, Message
+    MAIL_AVAILABLE = True
+except ImportError:
+    MAIL_AVAILABLE = False
+    Mail = None
+    Message = None
+    print("WARNING: flask_mail not installed. Run: pip install flask-mail")
+try:
+    from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
+    TOKENS_AVAILABLE = True
+except ImportError:
+    TOKENS_AVAILABLE = False
+    URLSafeTimedSerializer = None
+    SignatureExpired = Exception
+    BadSignature = Exception
+    print("WARNING: itsdangerous not installed. Run: pip install itsdangerous")
 
 def get_current_role():
     """Return the role of the currently logged-in user (admin or member)."""
@@ -92,7 +300,7 @@ def require_treasurer_or_above(f):
         if role not in ("admin", "treasurer"):
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "Treasurer or admin access required"}), 403
-            return redirect("/member-login")
+            return redirect("/login")
         return f(*args, **kwargs)
     return decorated
 
@@ -104,7 +312,7 @@ def require_any_member(f):
         if not role:
             if request.is_json or request.path.startswith("/api/"):
                 return jsonify({"error": "Authentication required"}), 401
-            return redirect("/member-login")
+            return redirect("/login")
         return f(*args, **kwargs)
     return decorated
 
@@ -118,12 +326,19 @@ def is_own_member_data(member_id):
 
 
 def get_group_admin_member_id(db, group_id):
+    """
+    Returns the member_id of the group's admin (role='admin').
+    is_system is reserved for the platform owner only and is never
+    tied to a specific group's admin.
+    """
     cursor = get_cursor(db)
     cursor.execute(
         """
         SELECT id
         FROM members
-        WHERE group_id = %s AND is_system = 1
+        WHERE group_id = %s AND role = 'admin'
+        ORDER BY id ASC
+        LIMIT 1
         """,
         (group_id,)
     )
@@ -131,7 +346,7 @@ def get_group_admin_member_id(db, group_id):
     cursor.close()
 
     if not row:
-        raise Exception(f"No system admin member found for group_id={group_id}")
+        raise Exception(f"No admin member found for group_id={group_id}")
 
     return row["id"]
 
@@ -274,22 +489,27 @@ def get_member_hisa_units(db, member_id, group_id):
 
 def get_total_hisa_units(db, group_id):
     settings = get_group_settings(db, group_id)
+
     unit_price = float(settings.get('hisa_unit_price', 5000))
-    admin_id = get_group_admin_member_id(db, group_id)
-    
+
     cursor = get_cursor(db)
+
     cursor.execute(
         """
-        SELECT SUM(amount) 
-        FROM contributions 
-        WHERE group_id = %s AND type IN ('hisa') AND member_id != %s
+        SELECT COALESCE(SUM(amount), 0)
+        FROM contributions
+        WHERE group_id = %s
+          AND type = 'hisa'
         """,
-        (group_id, admin_id)
+        (group_id,)
     )
-    total_hisa = get_single_value(cursor, 0)
+
+    total_hisa = get_single_value(cursor, 0) or 0
+
     cursor.close()
-    
-    units = total_hisa / unit_price if unit_price > 0 else 0
+
+    units = float(total_hisa) / unit_price if unit_price > 0 else 0
+
     return units
 
 
@@ -333,7 +553,7 @@ def get_current_group_profit(db, group_id):
     cursor = get_cursor(db)
     
     cursor.execute(
-        "SELECT COUNT(id) FROM members WHERE group_id = %s AND is_system = 0",
+        "SELECT COUNT(id) FROM members WHERE group_id = %s",
         (group_id,)
     )
     total_members = get_single_value(cursor, 0)
@@ -851,108 +1071,38 @@ def signup():
     cursor = get_cursor(db)
     
     if request.method == "POST":
-        name = request.form.get("name")
-        email = request.form.get("email")
-        password = request.form.get("password")
+        name     = (request.form.get("name")     or "").strip()
+        phone    = (request.form.get("phone")    or "").strip()
+        email    = (request.form.get("email")    or "").strip()
+        password = (request.form.get("password") or "").strip()
 
-        if not name or not email or not password:
+        if not name or not phone or not email or not password:
             cursor.close()
             return render_template("signup.html", error="All fields are required")
 
-        cursor.execute(
-            "SELECT * FROM members WHERE email=%s AND is_system=1",
-            (email,)
-        )
-        existing = cursor.fetchone()
-        
-        if existing:
+        if len(password) < 6:
             cursor.close()
-            return render_template("signup.html", error="Email already registered")
+            return render_template("signup.html", error="Password must be at least 6 characters")
 
         cursor.execute("""
-            INSERT INTO members (name, email, password, is_system, joined_date)
-            VALUES (%s, %s, %s, 1, CURRENT_DATE)
+            INSERT INTO members (name, phone, email, password, is_system, role, is_active, joined_date)
+            VALUES (%s, %s, %s, %s, 0, 'admin', 1, CURRENT_DATE)
             RETURNING id
-        """, (name, email, generate_password_hash(password)))
-        
+        """, (name, phone, email, generate_password_hash(password)))
+
         new_admin_id = cursor.fetchone()["id"]
         db.commit()
-        
-        session["user_id"] = new_admin_id
-        session["role"] = "admin"
+
+        session["user_id"]     = new_admin_id
+        session["member_id"]   = new_admin_id
+        session["role"]        = "admin"
+        session["member_name"] = name
         cursor.close()
         return redirect("/create-group")
 
     cursor.close()
     return render_template("signup.html")
 
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    # Already logged in — redirect appropriately
-    if session.get("user_id") and session.get("group_id"):
-        role = session.get("role")
-        if role in ("admin", "treasurer"):
-            return redirect("/dashboard")
-        return redirect("/member-portal")
-
-    db = get_db()
-    cursor = get_cursor(db)
-    error = None
-
-    if request.method == "POST":
-        group_code = (request.form.get("group_code") or "").strip()
-        phone      = (request.form.get("phone")      or "").strip()
-        password   = request.form.get("password") or ""
-
-        if not group_code or not phone or not password:
-            error = "Group ID, phone number and password are required."
-        else:
-            try:
-                cursor.execute(
-                    """
-                    SELECT *
-                    FROM members
-                    WHERE group_id = %s
-                      AND phone = %s
-                    LIMIT 1
-                    """,
-                    (group_code, phone)
-                )
-                user = cursor.fetchone()
-
-                if user is None:
-                    error = "Invalid Group ID, phone number or password."
-                elif not user["is_active"]:
-                    error = "Your account is inactive. Please contact your Kikoba administrator."
-                elif not user["password"] or not check_password_hash(user["password"], password):
-                    error = "Invalid Group ID, phone number or password."
-                else:
-                    role = (user["role"] or "member").strip().lower()
-                    if role not in ("admin", "treasurer", "member"):
-                        error = "Your account has an invalid role. Please contact your Kikoba administrator."
-                    else:
-                        session.clear()
-                        session["user_id"]     = user["id"]
-                        session["member_id"]   = user["id"]
-                        session["group_id"]    = user["group_id"]
-                        session["role"]        = role
-                        session["member_name"] = user["name"]
-
-                        cursor.close()
-                        if role == "admin":
-                            return redirect("/dashboard")
-                        elif role == "treasurer":
-                            return redirect("/dashboard")
-                        else:
-                            return redirect("/member-portal")
-
-            except Exception as e:
-                print("Login error:", e)
-                error = "An error occurred while trying to log in."
-
-    cursor.close()
-    return render_template("login.html", error=error)
 
 
 @app.route('/api/groups', methods=['POST'])
@@ -993,6 +1143,8 @@ def create_group():
                 group_id = create_new_group(db, group_name, session["user_id"])
                 session["group_id"] = group_id
                 session["role"] = "admin"
+                session["show_group_id_banner"] = True
+                generate_monthly_bill(db, group_id)
                 return redirect("/dashboard")
             except Exception as e:
                 error = "Unable to create the Kikoba. Please try again."
@@ -1027,14 +1179,17 @@ def dashboard():
     group = cursor.fetchone()
     cursor.close()
 
+    show_group_id_banner = session.pop("show_group_id_banner", False)
     return render_template(
         "dashboard.html",
         admin=admin,
-        group=group
+        group=group,
+        show_group_id_banner=show_group_id_banner
     )
 
 
 @app.route('/api/dashboard', methods=['GET'])
+@require_any_member
 def get_dashboard_data():
     db = get_db()
     group_id = get_current_group_id()
@@ -1050,7 +1205,7 @@ def get_dashboard_data():
 
     cursor = get_cursor(db)
     cursor.execute(
-        "SELECT COUNT(id) FROM members WHERE group_id = %s AND is_system = 0",
+        "SELECT COUNT(id) FROM members WHERE group_id = %s",
         (group_id,)
     )
     total_members = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else None)(cursor.fetchone())
@@ -1063,13 +1218,12 @@ def get_dashboard_data():
     
     cursor.execute(
         """
-        SELECT SUM(amount) 
-        FROM contributions 
-        WHERE group_id = %s 
-          AND member_id != %s
+        SELECT SUM(amount)
+        FROM contributions
+        WHERE group_id = %s
           AND type IN ('hisa anzia', 'hisa', 'jamii')
         """,
-        (group_id, admin_id)
+        (group_id,)
     )
     total_contributions = (lambda r: list(r.values())[0] if r and list(r.values())[0] is not None else 0)(cursor.fetchone())
     cursor.close()
@@ -1113,6 +1267,7 @@ def get_dashboard_data():
 # ==================== CONFIGURATION ROUTES ====================
 
 @app.route('/api/loan_rules', methods=['GET'])
+@require_treasurer_or_above
 def get_loan_rules_api():
     db = get_db()
     group_id = get_current_group_id()
@@ -1132,6 +1287,7 @@ def get_loan_rules_api():
 
 
 @app.route('/api/loan_rules', methods=['POST'])
+@require_admin
 def save_loan_rules_api():
     db = get_db()
     group_id = get_current_group_id()
@@ -1169,9 +1325,14 @@ def save_loan_rules_api():
 
 
 @app.route('/api/settings', methods=['GET', 'POST'])
+@require_treasurer_or_above
 def handle_settings():
     db = get_db()
     group_id = get_current_group_id()
+
+    # Only admins can write settings
+    if request.method == 'POST' and session.get('role') != 'admin':
+        return jsonify({"error": "Admin access required to change settings"}), 403
     
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
@@ -1228,6 +1389,7 @@ def handle_settings():
 
 
 @app.route('/api/constitution/upload', methods=['POST'])
+@require_admin
 def upload_constitution():
     db = get_db()
     group_id = get_current_group_id()
@@ -1265,6 +1427,7 @@ def upload_constitution():
 
 
 @app.route("/constitution/view")
+@require_treasurer_or_above
 def view_constitution():
     db = get_db()
     group_id = get_current_group_id()
@@ -1291,6 +1454,7 @@ def view_constitution():
 
 
 @app.route("/constitution/download")
+@require_treasurer_or_above
 def download_constitution():
     db = get_db()
     group_id = get_current_group_id()
@@ -1317,6 +1481,7 @@ def download_constitution():
 
 
 @app.route('/api/constitution/status', methods=['GET'])
+@require_treasurer_or_above
 def constitution_status():
     db = get_db()
     group_id = get_current_group_id()
@@ -1348,6 +1513,7 @@ def constitution_status():
 
 
 @app.route('/api/jamii_deduction', methods=['POST'])
+@require_admin
 def record_jamii_deduction():
     db = get_db()
     group_id = get_current_group_id()
@@ -1393,62 +1559,6 @@ def record_jamii_deduction():
 
 # ==================== MEMBER AUTH ROUTES ====================
 
-@app.route('/member-login', methods=['GET', 'POST'])
-def member_login():
-    """Login for regular members (admin, treasurer, member roles)."""
-    # Already logged in as system admin → go to dashboard
-    if session.get("user_id") and session.get("role") in ("admin", "treasurer"):
-        return redirect("/dashboard")
-    # Already logged in as member → go to portal
-    if session.get("role") in ("admin", "treasurer", "member"):
-        return redirect("/member-portal")
-
-    db = get_db()
-    error = None
-
-    if request.method == 'POST':
-        phone = (request.form.get("phone") or "").strip()
-        password = request.form.get("password") or ""
-        group_code = (request.form.get("group_code") or "").strip()
-
-        if not phone or not password:
-            error = "Phone number and password are required"
-        else:
-            cursor = get_cursor(db)
-            # Find member by phone + group_id (group_code is group_id for now)
-            try:
-                gid = int(group_code)
-            except (ValueError, TypeError):
-                cursor.close()
-                return render_template("member_login.html", error="Invalid group code")
-
-            cursor.execute("""
-                SELECT id, name, password, role, is_active, group_id
-                FROM members
-                WHERE phone = %s AND group_id = %s AND is_system = 0
-                LIMIT 1
-            """, (phone, gid))
-            member = cursor.fetchone()
-            cursor.close()
-
-            if not member:
-                error = "Member not found in that group"
-            elif not member["password"]:
-                error = "Your account has no password set. Ask your admin to set one."
-            elif not member["is_active"]:
-                error = "Your account has been deactivated. Contact your admin."
-            elif not check_password_hash(member["password"], password):
-                error = "Incorrect password"
-            else:
-                session.clear()
-                session["member_id"] = member["id"]
-                session["group_id"] = member["group_id"]
-                session["role"] = member["role"]
-                session["member_name"] = member["name"]
-                return redirect("/member-portal")
-
-    return render_template("member_login.html", error=error)
-
 
 @app.route('/member-portal')
 @require_any_member
@@ -1459,7 +1569,7 @@ def member_portal():
         return redirect("/dashboard")
     member_id = session.get("member_id")
     if not member_id:
-        return redirect("/member-login")
+        return redirect("/login")
     return render_template("member_portal.html",
                            member_id=member_id,
                            member_name=session.get("member_name", ""))
@@ -1508,6 +1618,49 @@ def get_my_details():
     return get_member_details(member_id)
 
 
+
+@app.route('/api/member/set-role', methods=['POST'])
+@require_admin
+def set_member_role():
+    """Admin assigns a role to a member without changing password."""
+    db       = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    data      = request.get_json()
+    member_id = data.get("member_id")
+    role      = (data.get("role") or "member").strip().lower()
+
+    if not member_id:
+        return jsonify({"error": "member_id required"}), 400
+    if role not in ("admin", "treasurer", "member"):
+        return jsonify({"error": "Invalid role. Must be admin, treasurer or member."}), 400
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, name, role FROM members WHERE id = %s AND group_id = %s",
+        (member_id, group_id)
+    )
+    member = cursor.fetchone()
+    if not member:
+        cursor.close()
+        return jsonify({"error": "Member not found"}), 404
+
+    try:
+        cursor.execute(
+            "UPDATE members SET role = %s WHERE id = %s AND group_id = %s",
+            (role, member_id, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success",
+                        "message": f"{member['name']} is now {role}."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/member/set-password', methods=['POST'])
 @require_admin
 def set_member_password():
@@ -1517,10 +1670,11 @@ def set_member_password():
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
 
-    data = request.get_json()
-    member_id = data.get("member_id")
-    new_password = (data.get("password") or "").strip()
-    role = (data.get("role") or "member").strip()
+    data          = request.get_json()
+    member_id     = data.get("member_id")
+    new_password  = (data.get("password") or "").strip()
+    role          = (data.get("role") or "member").strip()
+    email         = (data.get("email") or "").strip()
 
     if not member_id or not new_password:
         return jsonify({"error": "member_id and password are required"}), 400
@@ -1540,18 +1694,32 @@ def set_member_password():
     if not member:
         cursor.close()
         return jsonify({"error": "Member not found"}), 404
-    if member["is_system"]:
-        cursor.close()
-        return jsonify({"error": "Cannot modify system admin via this route"}), 400
+    # Allow self-update but not downgrading the only admin
+    if member["is_system"] and role != "admin":
+        # Check there's another admin in the group
+        cursor.execute(
+            "SELECT COUNT(*) FROM members WHERE group_id=%s AND role='admin' AND id!=%s",
+            (group_id, member_id)
+        )
+        other_admins = get_single_value(cursor, 0)
+        if not other_admins:
+            cursor.close()
+            return jsonify({"error": "Cannot change role — this is the only admin."}), 400
 
     try:
-        cursor.execute(
-            "UPDATE members SET password = %s, role = %s WHERE id = %s AND group_id = %s",
-            (generate_password_hash(new_password), role, member_id, group_id)
-        )
+        if email:
+            cursor.execute(
+                "UPDATE members SET password = %s, role = %s, email = %s WHERE id = %s AND group_id = %s",
+                (generate_password_hash(new_password), role, email, member_id, group_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE members SET password = %s, role = %s WHERE id = %s AND group_id = %s",
+                (generate_password_hash(new_password), role, member_id, group_id)
+            )
         db.commit()
         cursor.close()
-        return jsonify({"status": "success", "message": "Password and role updated."})
+        return jsonify({"status": "success", "message": "Password, role" + (" and email" if email else "") + " updated."})
     except Exception as e:
         db.rollback()
         cursor.close()
@@ -1602,31 +1770,945 @@ def toggle_member_active():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/logout', methods=['GET', 'POST'])
-def logout():
-    """Logs out any session type."""
-    session.clear()
-    return redirect("/login")
 
+# ==================== PASSWORD RESET ====================
+
+
+
+@app.route('/api/subscription/mark-paid', methods=['POST'])
+def mark_subscription_paid():
+    """Owner manually marks a subscription as paid."""
+    # Simple owner token check — replace with proper owner auth in Stage 4
+    owner_token = request.headers.get("X-Owner-Token")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data             = request.get_json()
+    group_id         = data.get("group_id")
+    period_start     = data.get("period_start")
+    amount_paid      = data.get("amount_paid", 0)
+    payment_ref      = data.get("payment_reference", "")
+
+    if not group_id or not period_start:
+        return jsonify({"error": "group_id and period_start required"}), 400
+
+    db = get_db()
+    cursor = get_cursor(db)
+
+    try:
+        # Update subscription record
+        cursor.execute(
+            """UPDATE subscriptions
+               SET amount_paid       = %s,
+                   status            = 'paid',
+                   payment_reference = %s,
+                   paid_at           = NOW()
+               WHERE group_id=%s AND period_start=%s""",
+            (amount_paid, payment_ref, group_id, period_start)
+        )
+
+        # Extend group access by 1 month from period end
+        cursor.execute(
+            "SELECT period_end FROM subscriptions WHERE group_id=%s AND period_start=%s",
+            (group_id, period_start)
+        )
+        sub = cursor.fetchone()
+        if sub:
+            period_end = sub["period_end"]
+            if isinstance(period_end, str):
+                period_end = datetime.strptime(period_end, "%Y-%m-%d").date()
+            grace_until = period_end + timedelta(days=GRACE_DAYS)
+
+            cursor.execute(
+                """UPDATE groups
+                   SET subscription_status  = 'active',
+                       subscription_expires = %s,
+                       grace_until          = %s
+                   WHERE id = %s""",
+                (period_end, grace_until, group_id)
+            )
+
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success", "message": "Payment recorded and access extended."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/subscription/toggle-free', methods=['POST'])
+def toggle_group_free():
+    """Owner manually marks a group as free (no billing)."""
+    owner_token = request.headers.get("X-Owner-Token")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data     = request.get_json()
+    group_id = data.get("group_id")
+    is_free  = 1 if data.get("is_free") else 0
+
+    if not group_id:
+        return jsonify({"error": "group_id required"}), 400
+
+    db = get_db()
+    cursor = get_cursor(db)
+    try:
+        cursor.execute(
+            """UPDATE groups
+               SET is_free             = %s,
+                   subscription_status = %s,
+                   subscription_expires = CASE WHEN %s = 1 THEN '2099-12-31' ELSE subscription_expires END
+               WHERE id = %s""",
+            (is_free, 'free' if is_free else 'active', is_free, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success", "message": f"Group {'set to free' if is_free else 'set to paid'}."})
+    except Exception as e:
+        db.rollback()
+        cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/subscription/generate-bill', methods=['POST'])
+def generate_bill():
+    """Generate month-end bill for a group (or all groups)."""
+    owner_token = request.headers.get("X-Owner-Token")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data     = request.get_json()
+    group_id = data.get("group_id")  # None = all groups
+
+    db = get_db()
+    cursor = get_cursor(db)
+
+    if group_id:
+        group_ids = [group_id]
+    else:
+        cursor.execute("SELECT id FROM groups")
+        group_ids = [r["id"] for r in cursor.fetchall()]
+    cursor.close()
+
+    for gid in group_ids:
+        generate_monthly_bill(db, gid)
+
+    return jsonify({"status": "success", "message": f"Bills generated for {len(group_ids)} group(s)."})
+
+
+@app.route('/api/subscription/status', methods=['GET'])
+@require_any_member
+def get_subscription_status():
+    """Any logged-in user can check their group's subscription status."""
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    db  = get_db()
+    sub = get_group_subscription_status(db, group_id)
+
+    cursor = get_cursor(db)
+    cursor.execute(
+        """SELECT * FROM subscriptions
+           WHERE group_id = %s
+           ORDER BY period_start DESC
+           LIMIT 6""",
+        (group_id,)
+    )
+    history = cursor.fetchall()
+    cursor.close()
+
+    return jsonify({
+        "subscription": sub,
+        "history": [dict(h) for h in history]
+    })
+
+
+# ==================== MEMBER TRANSPARENCY PAGES ====================
+
+@app.route('/member-members')
+@require_any_member
+def member_members_page():
+    if session.get('role') in ('admin', 'treasurer'):
+        return redirect('/members-page')
+    return render_template('member_members.html')
+
+@app.route('/member-contributions')
+@require_any_member
+def member_contributions_page():
+    if session.get('role') in ('admin', 'treasurer'):
+        return redirect('/contributions-page')
+    return render_template('member_contributions.html')
+
+@app.route('/member-loans')
+@require_any_member
+def member_loans_page():
+    if session.get('role') in ('admin', 'treasurer'):
+        return redirect('/loans-page')
+    return render_template('member_loans.html')
+
+@app.route('/member-penalties')
+@require_any_member
+def member_penalties_page():
+    if session.get('role') in ('admin', 'treasurer'):
+        return redirect('/penalties-page')
+    return render_template('member_penalties.html')
+
+
+
+
+# ==================== OWNER DASHBOARD (PLATFORM ADMIN) ====================
+# Protected by OWNER_TOKEN header — only you can access this
+# Access at /owner/dashboard
+
+def require_owner(f):
+    """Decorator: only platform owner can access."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = (
+            request.headers.get("X-Owner-Token") or
+            request.cookies.get("owner-token") or
+            request.args.get("owner_token")
+        )
+        if token != os.environ.get("OWNER_TOKEN", ""):
+            if request.path.startswith("/api/owner"):
+                return jsonify({"error": "Unauthorized"}), 403
+            return render_template("owner_login.html", error=None)
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route('/owner/login', methods=['GET', 'POST'])
+def owner_login():
+    if request.method == 'POST':
+        token = (request.form.get("token") or "").strip()
+        if token == os.environ.get("OWNER_TOKEN", ""):
+            resp = redirect("/owner/dashboard")
+            resp.set_cookie("owner-token", token, httponly=True,
+                            samesite="Lax", max_age=86400 * 7)
+            return resp
+        return render_template("owner_login.html", error="Invalid access token.")
+    return render_template("owner_login.html", error=None)
+
+
+@app.route('/owner/logout')
+def owner_logout():
+    resp = redirect("/owner/login")
+    resp.delete_cookie("owner-token")
+    return resp
+
+
+@app.route('/owner/dashboard')
+@require_owner
+def owner_dashboard():
+    return render_template("owner_dashboard.html")
+
+
+# ── Owner API ─────────────────────────────────────────────────────────
+
+@app.route('/api/owner/stats', methods=['GET'])
+@require_owner
+def owner_stats():
+    """Platform-wide statistics."""
+    db = get_db()
+    cursor = get_cursor(db)
+
+    # Groups summary
+    cursor.execute("""
+        SELECT
+            g.id, g.name, g.created_at,
+            g.subscription_status, g.subscription_expires,
+            g.is_free, g.profits_unlocked,
+            COUNT(m.id) AS member_count,
+            COUNT(m.id) FILTER (WHERE m.is_active = 1) AS active_members,
+            (SELECT COALESCE(SUM(amount), 0) FROM contributions WHERE group_id = g.id) AS total_contributions,
+            (SELECT COALESCE(SUM(principal), 0) FROM loans WHERE group_id = g.id) AS total_loans,
+            (SELECT COALESCE(SUM(amount_paid), 0) FROM penalties WHERE group_id = g.id) AS penalties_collected
+        FROM groups g
+        LEFT JOIN members m ON m.group_id = g.id
+        GROUP BY g.id, g.name, g.created_at, g.subscription_status,
+                 g.subscription_expires, g.is_free, g.profits_unlocked
+        ORDER BY g.id
+    """)
+    groups = [dict(r) for r in cursor.fetchall()]
+
+    # Platform totals
+    cursor.execute("SELECT COUNT(*) FROM groups")
+    total_groups = get_single_value(cursor, 0)
+
+    cursor.execute("SELECT COUNT(*) FROM members WHERE is_system = 0")
+    total_members = get_single_value(cursor, 0)
+
+    cursor.execute("SELECT COALESCE(SUM(amount_paid), 0) FROM subscriptions WHERE status = 'paid'")
+    total_subscription_revenue = get_single_value(cursor, 0)
+
+    cursor.execute("""
+        SELECT COALESCE(SUM(amount_due), 0) FROM subscriptions
+        WHERE status = 'unpaid'
+          AND period_end < CURRENT_DATE
+    """)
+    total_outstanding_bills = get_single_value(cursor, 0)
+
+    # Recent subscription records
+    cursor.execute("""
+        SELECT s.*, g.name AS group_name
+        FROM subscriptions s
+        JOIN groups g ON g.id = s.group_id
+        ORDER BY s.created_at DESC
+        LIMIT 20
+    """)
+    recent_bills = [dict(r) for r in cursor.fetchall()]
+
+    cursor.close()
+    return jsonify({
+        "groups": groups,
+        "totals": {
+            "total_groups": total_groups,
+            "total_members": total_members,
+            "total_subscription_revenue": float(total_subscription_revenue),
+            "total_outstanding_bills": float(total_outstanding_bills),
+        },
+        "recent_bills": recent_bills
+    })
+
+
+@app.route('/api/owner/group/<int:group_id>', methods=['GET'])
+@require_owner
+def owner_group_detail(group_id):
+    """Detailed view of one group."""
+    db = get_db()
+    cursor = get_cursor(db)
+
+    cursor.execute("""
+        SELECT g.*, COUNT(m.id) AS member_count
+        FROM groups g
+        LEFT JOIN members m ON m.group_id = g.id
+        WHERE g.id = %s
+        GROUP BY g.id
+    """, (group_id,))
+    group = cursor.fetchone()
+    if not group:
+        cursor.close()
+        return jsonify({"error": "Group not found"}), 404
+
+    cursor.execute("""
+        SELECT id, name, phone, email, role, is_active,
+               CASE WHEN password IS NOT NULL THEN true ELSE false END AS has_password
+        FROM members WHERE group_id = %s ORDER BY role, name
+    """, (group_id,))
+    members = [dict(r) for r in cursor.fetchall()]
+
+    cursor.execute("""
+        SELECT * FROM subscriptions WHERE group_id = %s ORDER BY period_start DESC
+    """, (group_id,))
+    bills = [dict(r) for r in cursor.fetchall()]
+
+    cursor.close()
+    return jsonify({"group": dict(group), "members": members, "bills": bills})
+
+
+@app.route('/api/owner/group/<int:group_id>/toggle-free', methods=['POST'])
+@require_owner
+def owner_toggle_free(group_id):
+    """Mark a group as free or paid."""
+    db = get_db()
+    data    = request.get_json()
+    is_free = 1 if data.get("is_free") else 0
+    cursor  = get_cursor(db)
+    try:
+        cursor.execute(
+            """UPDATE groups SET is_free=%s,
+               subscription_status=%s,
+               subscription_expires=CASE WHEN %s=1 THEN '2099-12-31' ELSE subscription_expires END
+               WHERE id=%s""",
+            (is_free, 'free' if is_free else 'active', is_free, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success"})
+    except Exception as e:
+        db.rollback(); cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/group/<int:group_id>/unlock-profits', methods=['POST'])
+@require_owner
+def owner_unlock_profits(group_id):
+    """Unlock the profit distribution page for a group."""
+    db = get_db()
+    data   = request.get_json()
+    unlock = 1 if data.get("unlock", True) else 0
+    cursor = get_cursor(db)
+    try:
+        cursor.execute(
+            "UPDATE groups SET profits_unlocked=%s WHERE id=%s",
+            (unlock, group_id)
+        )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success",
+                        "message": "Profits " + ("unlocked" if unlock else "locked") + "."})
+    except Exception as e:
+        db.rollback(); cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/group/<int:group_id>/activate', methods=['POST'])
+@require_owner
+def owner_activate_group(group_id):
+    """Manually activate/suspend a group."""
+    db     = get_db()
+    data   = request.get_json()
+    active = data.get("active", True)
+    cursor = get_cursor(db)
+    try:
+        if active:
+            # Extend subscription by 1 month from today
+            new_expiry  = date.today().replace(day=1)
+            import calendar as cal
+            last_day    = cal.monthrange(new_expiry.year, new_expiry.month)[1]
+            new_expiry  = new_expiry.replace(day=last_day)
+            grace_until = new_expiry + timedelta(days=GRACE_DAYS)
+            cursor.execute(
+                """UPDATE groups SET subscription_status='active',
+                   subscription_expires=%s, grace_until=%s WHERE id=%s""",
+                (new_expiry, grace_until, group_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE groups SET subscription_status='suspended' WHERE id=%s",
+                (group_id,)
+            )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success"})
+    except Exception as e:
+        db.rollback(); cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/subscription/mark-paid', methods=['POST'])
+@require_owner
+def owner_mark_paid(group_id=None):
+    """Mark a subscription bill as paid and extend access."""
+    db   = get_db()
+    data = request.get_json()
+    gid  = data.get("group_id")
+    period_start = data.get("period_start")
+    amount_paid  = int(data.get("amount_paid", 0))
+    ref          = data.get("payment_reference", "")
+
+    if not gid or not period_start:
+        return jsonify({"error": "group_id and period_start required"}), 400
+
+    cursor = get_cursor(db)
+    try:
+        cursor.execute(
+            """UPDATE subscriptions SET amount_paid=%s, status='paid',
+               payment_reference=%s, paid_at=NOW()
+               WHERE group_id=%s AND period_start=%s""",
+            (amount_paid, ref, gid, period_start)
+        )
+        # Extend group access
+        cursor.execute(
+            "SELECT period_end FROM subscriptions WHERE group_id=%s AND period_start=%s",
+            (gid, period_start)
+        )
+        row = cursor.fetchone()
+        if row:
+            pend = row["period_end"]
+            if isinstance(pend, str):
+                pend = datetime.strptime(pend, "%Y-%m-%d").date()
+            grace = pend + timedelta(days=GRACE_DAYS)
+            cursor.execute(
+                """UPDATE groups SET subscription_status='active',
+                   subscription_expires=%s, grace_until=%s WHERE id=%s""",
+                (pend, grace, gid)
+            )
+        db.commit()
+        cursor.close()
+        return jsonify({"status": "success", "message": "Payment recorded and access extended."})
+    except Exception as e:
+        db.rollback(); cursor.close()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/subscription/generate-bills', methods=['POST'])
+@require_owner
+def owner_generate_bills():
+    """Generate month-end bills for all non-free groups."""
+    db = get_db()
+    cursor = get_cursor(db)
+    cursor.execute("SELECT id FROM groups")
+    gids = [r["id"] for r in cursor.fetchall()]
+    cursor.close()
+    for gid in gids:
+        generate_monthly_bill(db, gid)
+    return jsonify({"status": "success", "message": f"Bills generated for {len(gids)} groups."})
+
+# ==================== SUPABASE AUTH ROUTES ====================
+
+
+@app.route('/api/auth/set-session', methods=['POST'])
+def set_session():
+    """
+    Called by frontend after Supabase JS login.
+    Verifies JWT, finds all memberships, optionally sets Flask session
+    for a specific group_id.
+    Returns list of groups the user belongs to.
+    """
+    data     = request.get_json() or {}
+    token    = data.get("token", "")
+    group_id = data.get("group_id")  # Optional — set if user picked a group
+
+    if not token:
+        return jsonify({"error": "token required"}), 400
+
+    # Verify JWT
+    if SUPABASE_AUTH_ENABLED:
+        payload = verify_supabase_jwt(token)
+    else:
+        # Fallback: decode without verification
+        try:
+            import base64, json as _json
+            parts   = token.split('.')
+            padded  = parts[1] + '=' * (4 - len(parts[1]) % 4)
+            payload = _json.loads(base64.urlsafe_b64decode(padded))
+        except Exception:
+            return jsonify({"error": "Invalid token"}), 401
+
+    if not payload:
+        return jsonify({"error": "Invalid or expired token"}), 401
+
+    auth_user_id = payload.get("sub", "")
+    jwt_phone    = payload.get("phone", "")
+    jwt_email    = payload.get("email", "")
+
+    # Find all memberships for this user
+    db = get_db()
+    cursor = get_cursor(db)
+    cursor.execute("""
+        SELECT m.id, m.name, m.phone, m.email, m.group_id, m.role,
+               COALESCE(m.is_active, 1) AS is_active,
+               g.name AS group_name,
+               m.is_system
+        FROM members m
+        JOIN groups g ON g.id = m.group_id
+        WHERE (
+            m.user_id = %s
+            OR (m.phone IS NOT NULL AND m.phone != '' AND m.phone = %s)
+            OR (m.email IS NOT NULL AND m.email != '' AND m.email = %s)
+        )
+        AND COALESCE(m.is_active, 1) = 1
+        ORDER BY g.name
+    """, (auth_user_id, jwt_phone, jwt_email))
+    rows = cursor.fetchall()
+
+    # Deduplicate by (member_id, group_id) — avoid showing same group twice
+    seen   = set()
+    groups = []
+    for r in rows:
+        key = (r['id'], r['group_id'])
+        if key not in seen:
+            seen.add(key)
+            role = r['role'] or ('admin' if r['is_system'] else 'member')
+            groups.append({
+                "member_id":  r['id'],
+                "group_id":   r['group_id'],
+                "group_name": r['group_name'],
+                "role":       role,
+                "name":       r['name'],
+            })
+        # Auto-link user_id if not yet set
+        if auth_user_id:
+            try:
+                cursor.execute(
+                    "UPDATE members SET user_id = %s WHERE id = %s AND user_id IS NULL",
+                    (auth_user_id, r['id'])
+                )
+            except Exception:
+                pass
+
+    db.commit()
+    cursor.close()
+
+    if not groups:
+        return jsonify({"error": "No Kikoba membership found for this account."}), 404
+
+    # If group_id provided (user picked one), set Flask session now
+    if group_id:
+        picked = next((g for g in groups if g['group_id'] == int(group_id)), None)
+        if picked:
+            session.clear()
+            session['user_id']     = picked['member_id']
+            session['member_id']   = picked['member_id']
+            session['group_id']    = picked['group_id']
+            session['role']        = picked['role']
+            session['member_name'] = picked['name']
+            return jsonify({
+                "status":    "session_set",
+                "role":      picked['role'],
+                "group_id":  picked['group_id'],
+                "redirect":  "/dashboard" if picked['role'] in ("admin","treasurer") else "/member-portal"
+            })
+
+    # Return all groups for the picker
+    return jsonify({"status": "pick_group", "groups": groups})
+
+@app.route('/api/auth/memberships', methods=['GET'])
+def get_memberships():
+    """Return all group memberships for the authenticated user."""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Not authenticated"}), 401
+    memberships = get_all_memberships(user["auth_user_id"])
+    return jsonify({"memberships": memberships, "user": {
+        "auth_user_id": user["auth_user_id"],
+        "email": user.get("email", ""),
+        "phone": user.get("phone", "")
+    }})
+
+
+@app.route('/api/auth/me', methods=['GET'])
+def get_me():
+    """Return current user + group context."""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Not authenticated"}), 401
+    return jsonify(user)
+
+
+@app.route('/api/auth/switch-group', methods=['POST'])
+def switch_group():
+    """Switch active group for a user with multiple memberships."""
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    data     = request.get_json()
+    group_id = data.get("group_id")
+    if not group_id:
+        return jsonify({"error": "group_id required"}), 400
+
+    db = get_db()
+    cursor = get_cursor(db)
+    cursor.execute(
+        "SELECT id, role, is_active FROM members WHERE user_id = %s AND group_id = %s",
+        (user["auth_user_id"], group_id)
+    )
+    membership = cursor.fetchone()
+    cursor.close()
+
+    if not membership:
+        return jsonify({"error": "You are not a member of this group"}), 403
+    if not membership["is_active"]:
+        return jsonify({"error": "Your membership in this group is inactive"}), 403
+
+    return jsonify({"status": "success", "group_id": group_id, "role": membership["role"]})
+
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    """Password reset via Supabase Auth + Brevo email."""
+    if request.method == 'GET':
+        return render_template('forgot_password.html')
+
+    email = (request.form.get('email') or '').strip()
+    if not email:
+        return render_template('forgot_password.html', error="Email is required.")
+
+    # Use Supabase Auth password reset (sends email via Supabase)
+    # We also send our branded Brevo email
+    import requests as req
+    try:
+        # Trigger Supabase password reset
+        res = req.post(
+            f"{SUPABASE_URL}/auth/v1/recover",
+            headers={
+                "apikey": SUPABASE_ANON,
+                "Content-Type": "application/json"
+            },
+            json={"email": email},
+            timeout=10
+        )
+
+        # Also send branded Brevo email if we have the user's name
+        db = get_db()
+        cursor = get_cursor(db)
+        cursor.execute("SELECT name FROM members WHERE email = %s LIMIT 1", (email,))
+        member = cursor.fetchone()
+        cursor.close()
+
+        if member:
+            reset_url = f"{request.host_url.rstrip('/')}reset-password"
+            send_password_reset_email(email, member["name"], reset_url)
+    except Exception as e:
+        print(f"Password reset error: {e}")
+
+    # Always show success (don't reveal if email exists)
+    return render_template('forgot_password.html',
+                           success="If that email is registered, a reset link has been sent.")
+
+
+@app.route('/reset-password', methods=['GET'])
+def reset_password_page():
+    """Supabase handles the actual reset via its redirect URL."""
+    return render_template('reset_password.html', token=None, error=None)
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login_page():
+    """
+    Unified login for all roles: admin, treasurer, member.
+    GET  → serve the login page (Supabase JS handles auth)
+    POST → legacy fallback using phone + group_id + password (session-based)
+    """
+    # Already logged in → redirect appropriately
+    if session.get("user_id") and session.get("group_id"):
+        role = session.get("role", "member")
+        if role in ("admin", "treasurer"):
+            return redirect("/dashboard")
+        return redirect("/member-portal")
+
+    # POST: form-based login — phone/email + password, no Group ID needed
+    if request.method == "POST":
+        identifier = (request.form.get("identifier") or
+                      request.form.get("phone")      or
+                      request.form.get("email")      or "").strip()
+        password   =  request.form.get("password") or ""
+        group_id   = (request.form.get("group_id") or "").strip()  # optional: from group picker
+
+        if not identifier or not password:
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Phone/email and password are required.")
+
+        db = get_db()
+        cursor = get_cursor(db)
+
+        # Find ALL memberships matching phone or email
+        # Normalise phone to try multiple formats
+        phone_variants = [identifier]
+        cleaned = identifier.strip().replace(' ', '').replace('-', '')
+        if cleaned.startswith('+255'):
+            phone_variants += [cleaned[4:], '0' + cleaned[4:], cleaned[1:]]
+        elif cleaned.startswith('255'):
+            phone_variants += ['+' + cleaned, cleaned[3:], '0' + cleaned[3:]]
+        elif cleaned.startswith('0') and len(cleaned) >= 9:
+            phone_variants += ['+255' + cleaned[1:], '255' + cleaned[1:]]
+        # Deduplicate
+        phone_variants = list(dict.fromkeys(phone_variants))
+
+        cursor.execute("""
+            SELECT m.id, m.name, m.password, m.role, m.is_active,
+                   m.group_id, m.is_system, g.name AS group_name
+            FROM members m
+            JOIN groups g ON g.id = m.group_id
+            WHERE (
+                m.phone = ANY(%s::text[])
+                OR m.email = %s
+            )
+            ORDER BY g.name
+        """, (phone_variants, identifier))
+        matches = cursor.fetchall()
+        cursor.close()
+
+        if not matches:
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Account not found. Check your phone/email.")
+
+        # Verify password against first match (same password across all groups)
+        first = matches[0]
+        if not first["password"] or not check_password_hash(first["password"], password):
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Incorrect password.")
+
+        # Build deduplicated group list
+        seen   = set()
+        groups = []
+        for u in matches:
+            if u['group_id'] in seen: continue
+            seen.add(u['group_id'])
+            if not u.get('is_active', 1): continue
+            groups.append(u)
+
+        if not groups:
+            return render_template("login.html",
+                                   supabase_url=SUPABASE_URL,
+                                   supabase_anon=SUPABASE_ANON,
+                                   error="Your account is inactive. Contact your admin.")
+
+        # If only one group OR user already picked a group → set session
+        def set_session_and_redirect(u):
+            role = (u["role"] or ("admin" if u["is_system"] else "member")).strip().lower()
+            session.clear()
+            session["user_id"]     = u["id"]
+            session["member_id"]   = u["id"]
+            session["group_id"]    = u["group_id"]
+            session["role"]        = role
+            session["member_name"] = u["name"]
+            return redirect("/dashboard" if role in ("admin","treasurer") else "/member-portal")
+
+        if group_id:
+            picked = next((u for u in groups if str(u['group_id']) == str(group_id)), None)
+            if picked:
+                return set_session_and_redirect(picked)
+
+        if len(groups) == 1:
+            return set_session_and_redirect(groups[0])
+
+        # Multiple groups → show picker (re-render with groups list)
+        return render_template("login.html",
+                               supabase_url=SUPABASE_URL,
+                               supabase_anon=SUPABASE_ANON,
+                               show_picker=True,
+                               picker_groups=groups,
+                               identifier=identifier,
+                               password=password)
+
+    # GET → serve login page
+    return render_template("login.html",
+                           supabase_url=SUPABASE_URL,
+                           supabase_anon=SUPABASE_ANON)
+
+
+@app.route('/logout')
+def logout():
+    """Clear server-side session. Client clears Supabase session via JS."""
+    session.clear()
+    resp = redirect('/login')
+    resp.delete_cookie('sb-access-token')
+    resp.delete_cookie('sb-refresh-token')
+    resp.delete_cookie('sb-group-id')
+    return resp
+
+
+# ==================== SMS REMINDERS ====================
+
+@app.route('/api/reminders/loan-due', methods=['POST'])
+def send_loan_due_reminders():
+    """
+    Send SMS reminders for loans due in 1 or 3 days.
+    Call this daily via a cron job or scheduler.
+    Owner-token protected.
+    """
+    owner_token = request.headers.get("X-Owner-Token", "")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    db       = get_db()
+    cursor   = get_cursor(db)
+    today    = date.today()
+    sent     = 0
+    errors   = 0
+
+    # Find all active loans with monthly due dates in 1 or 3 days
+    cursor.execute("""
+        SELECT l.id, l.member_id, l.principal, l.months, l.due_date,
+               m.name AS member_name, m.phone,
+               g.name AS group_name, l.group_id
+        FROM loans l
+        JOIN members m ON m.id = l.member_id
+        JOIN groups g ON g.id = l.group_id
+        WHERE l.status IN ('Active', 'Overdue')
+          AND m.phone IS NOT NULL
+    """)
+    loans = cursor.fetchall()
+
+    import calendar as cal
+    for loan in loans:
+        monthly = float(loan['principal']) / int(loan['months'])
+        final_due = datetime.strptime(loan['due_date'], "%Y-%m-%d").date()
+        months = int(loan['months'])
+
+        # Check each monthly due date
+        base_month = final_due.month - months
+        base_year  = final_due.year
+        if base_month <= 0:
+            base_month += 12
+            base_year  -= 1
+
+        for mn in range(1, months + 1):
+            dm, dy = base_month + mn, base_year
+            if dm > 12: dm -= 12; dy += 1
+            due = date(dy, dm, min(final_due.day, cal.monthrange(dy, dm)[1]))
+
+            days_until = (due - today).days
+            if days_until in (1, 3):
+                ok = send_loan_due_reminder(
+                    phone=loan['phone'],
+                    member_name=loan['member_name'],
+                    group_name=loan['group_name'],
+                    days_until_due=days_until,
+                    monthly_amount=monthly,
+                    due_date=due
+                )
+                if ok: sent += 1
+                else:  errors += 1
+
+    cursor.close()
+    return jsonify({"status": "success", "sent": sent, "errors": errors})
+
+
+@app.route('/api/reminders/subscription-due', methods=['POST'])
+def send_subscription_due_reminders():
+    """Send SMS to admins 3 days before subscription expires."""
+    owner_token = request.headers.get("X-Owner-Token", "")
+    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    db     = get_db()
+    cursor = get_cursor(db)
+    today  = date.today()
+    warn   = today + timedelta(days=3)
+    sent   = 0
+
+    cursor.execute("""
+        SELECT g.id, g.name, g.subscription_expires,
+               m.name AS admin_name, m.phone, m.group_id,
+               (SELECT COUNT(*) FROM members WHERE group_id=g.id AND is_system=0) AS member_count
+        FROM groups g
+        JOIN members m ON m.group_id = g.id AND m.role = 'admin'
+        WHERE g.is_free = 0
+          AND g.subscription_expires = %s
+          AND m.phone IS NOT NULL
+    """, (warn,))
+
+    for row in cursor.fetchall():
+        amount_due = int(row['member_count']) * 1000
+        ok = send_subscription_reminder_sms(
+            phone=row['phone'],
+            admin_name=row['admin_name'],
+            group_name=row['name'],
+            amount_due=amount_due,
+            due_date=row['subscription_expires']
+        )
+        if ok: sent += 1
+
+    cursor.close()
+    return jsonify({"status": "success", "sent": sent})
 
 # ==================== MEMBERS ====================
 @app.route('/members-page')
+@require_treasurer_or_above
 def members_page():
-    if not session.get("user_id") or session.get("role") not in ("admin", "treasurer"):
-        return redirect("/login")
     return render_template('members.html')
 
 @app.route('/member-details/<int:member_id>')
+@require_treasurer_or_above
 def member_details_page(member_id):
-    if not session.get("user_id") or not session.get("group_id"):
-        return redirect("/login")
-    if session.get("role") not in ("admin", "treasurer"):
-        return redirect("/member-portal")
     
     return render_template('member_details.html', member_id=member_id)
 
 
 @app.route('/api/members/<int:member_id>/details', methods=['GET'])
+@require_any_member
 def get_member_details(member_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -1751,23 +2833,16 @@ def get_member_details(member_id):
             "date": p['date']
         })
     
-    # Calculate profit share
-    profit_data = get_current_group_profit(db, group_id)
-    net_profit = profit_data["net_profit_pool"]
-    total_units = get_total_hisa_units(db, group_id)
-    profit_per_unit = net_profit / total_units if total_units > 0 else 0
-    expected_profit_share = round(member_units * profit_per_unit)
-    
-    # Calculate net position
+    # Net position — contributions minus what's owed (no profit assumption,
+    # since profit distribution method is chosen later at cycle end)
     net_contribution_position = (
-        member_total_savings 
+        member_total_savings
         - loan_balances["remaining_loans"]
         - total_penalties_due
     )
-    net_payout = net_contribution_position + expected_profit_share
-    
+
     cursor.close()
-    
+
     return jsonify({
         "member": {
             "id": member['id'],
@@ -1785,9 +2860,7 @@ def get_member_details(member_id):
             "remaining_loans": loan_balances["remaining_loans"],
             "total_overdue": loan_balances["total_overdue"],
             "total_penalties": total_penalties_due,
-            "net_contribution_position": net_contribution_position,
-            "expected_profit_share": expected_profit_share,
-            "net_payout": net_payout
+            "net_contribution_position": net_contribution_position
         },
         "contribution_history": [dict(c) for c in contribution_history],
         "loans": loan_details,
@@ -1795,6 +2868,7 @@ def get_member_details(member_id):
     })
 
 @app.route('/api/members', methods=['GET'])
+@require_any_member
 def get_members():
     db = get_db()
     group_id = get_current_group_id()
@@ -1804,7 +2878,7 @@ def get_members():
     
     cursor = get_cursor(db)
     cursor.execute(
-        "SELECT * FROM members WHERE group_id = %s AND is_system = 0", 
+        "SELECT * FROM members WHERE group_id = %s ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'treasurer' THEN 1 ELSE 2 END, id ASC", 
         (group_id,)
     )
     members = cursor.fetchall()
@@ -1845,7 +2919,16 @@ def get_members():
         GROUP BY member_id
     """, (group_id,))
     penalties_map = {row['member_id']: row['total_penalties'] for row in cursor.fetchall()}
-    
+
+    # PRE-FETCH hisa-only contributions (for correct HISA units — matches member details page)
+    cursor.execute("""
+        SELECT member_id, SUM(amount) as total_hisa
+        FROM contributions
+        WHERE group_id = %s AND type = 'hisa'
+        GROUP BY member_id
+    """, (group_id,))
+    hisa_only_map = {row['member_id']: row['total_hisa'] for row in cursor.fetchall()}
+
     cursor.close()
     
     result = []
@@ -1859,9 +2942,10 @@ def get_members():
         total_loans = loans_map.get(member_id, 0)
         total_rejesho = rejesho_map.get(member_id, 0)
         total_penalties = penalties_map.get(member_id, 0)
-        
-        # Calculate HISA units (simplified)
-        hisa_units = total_contributions / unit_price if unit_price > 0 else 0
+        total_hisa_only = hisa_only_map.get(member_id, 0)
+
+        # HISA units use ONLY 'hisa' type contributions (matches member details page)
+        hisa_units = total_hisa_only / unit_price if unit_price > 0 else 0
         remaining_loans = max(total_loans - total_rejesho, 0)
 
         result.append({
@@ -1884,6 +2968,7 @@ def get_members():
 
 
 @app.route('/api/members', methods=['POST'])
+@require_admin
 def add_member():
     db = get_db()
     group_id = get_current_group_id()
@@ -1910,6 +2995,7 @@ def add_member():
 
 
 @app.route('/api/members/<int:member_id>', methods=['PUT', 'DELETE'])
+@require_admin
 def edit_member(member_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -1984,11 +3070,13 @@ def edit_member(member_id):
 # ==================== CONTRIBUTIONS ====================
 
 @app.route('/contributions-page')
+@require_treasurer_or_above
 def contributions_page():
     return render_template('contributions.html')
 
 
 @app.route('/api/contributions', methods=['GET'])
+@require_any_member
 def get_contributions():
     db = get_db()
     group_id = get_current_group_id()
@@ -2012,6 +3100,7 @@ def get_contributions():
 
 
 @app.route('/api/contributions', methods=['POST'])
+@require_treasurer_or_above
 def add_contribution():
     db = get_db()
     group_id = get_current_group_id()
@@ -2068,6 +3157,7 @@ def add_contribution():
 
 
 @app.route('/api/contributions/<int:contribution_id>', methods=['PUT', 'DELETE'])
+@require_admin
 def edit_contribution(contribution_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2141,11 +3231,13 @@ def edit_contribution(contribution_id):
 # ==================== LOANS ====================
 
 @app.route('/loans-page')
+@require_treasurer_or_above
 def loans_page():
     return render_template('loans.html')
 
 
 @app.route('/api/loans', methods=['GET'])
+@require_any_member
 def get_loans():
     db = get_db()
     group_id = get_current_group_id()
@@ -2213,6 +3305,7 @@ def get_loans():
 
 
 @app.route('/api/loans/preview', methods=['POST'])
+@require_treasurer_or_above
 def preview_loan():
     db = get_db()
     group_id = get_current_group_id()
@@ -2294,6 +3387,7 @@ def preview_loan():
     })
 
 @app.route('/api/loans', methods=['POST'])
+@require_treasurer_or_above
 def add_loan():
     db = get_db()
     group_id = get_current_group_id()
@@ -2438,6 +3532,7 @@ def add_loan():
 
 
 @app.route('/api/loans/<int:loan_id>', methods=['PUT', 'DELETE'])
+@require_admin
 def edit_loan(loan_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2514,6 +3609,7 @@ def edit_loan(loan_id):
 
 
 @app.route('/api/loans/<int:loan_id>/forgive', methods=['POST'])
+@require_admin
 def forgive_loan(loan_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2569,6 +3665,7 @@ def forgive_loan(loan_id):
 
 
 @app.route('/api/loans/<int:loan_id>/unforgive', methods=['POST'])
+@require_admin
 def unforgive_loan(loan_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2610,6 +3707,7 @@ def unforgive_loan(loan_id):
 
 
 @app.route('/loans-page/download', methods=['GET'])
+@require_treasurer_or_above
 def download_loans_pdf():
     db = get_db()
     group_id = get_current_group_id()
@@ -2754,12 +3852,14 @@ def download_loans_pdf():
 # ==================== REJESHO (REPAYMENTS) ====================
 
 @app.route('/repayments-page')
+@require_treasurer_or_above
 def repayments_page():
     loan_id = request.args.get('loan_id')
     return render_template('repayments.html', loan_id=loan_id)
 
 
 @app.route('/api/rejesho', methods=['POST'])
+@require_treasurer_or_above
 def add_rejesho():
     db = get_db()
     group_id = get_current_group_id()
@@ -2806,6 +3906,7 @@ def add_rejesho():
 
 
 @app.route('/api/rejesho/<int:loan_id>', methods=['GET'])
+@require_treasurer_or_above
 def get_rejesho_history(loan_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2858,6 +3959,7 @@ def get_rejesho_history(loan_id):
 
 
 @app.route('/api/rejesho/<int:rejesho_id>', methods=['DELETE'])
+@require_admin
 def delete_rejesho(rejesho_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -2897,11 +3999,13 @@ def delete_rejesho(rejesho_id):
 
 
 @app.route('/penalties-page')
+@require_treasurer_or_above
 def penalties_page():
     return render_template('penalties.html')
 
 
 @app.route('/api/penalties', methods=['GET'])
+@require_any_member
 def get_penalties():
     db = get_db()
     group_id = get_current_group_id()
@@ -2945,6 +4049,7 @@ def get_penalties():
 
 
 @app.route('/api/penalties', methods=['POST'])
+@require_treasurer_or_above
 def add_penalty():
     db = get_db()
     group_id = get_current_group_id()
@@ -2988,6 +4093,7 @@ def add_penalty():
 
 
 @app.route('/api/record_penalty_payment/<int:penalty_id>', methods=['POST'])
+@require_treasurer_or_above
 def record_penalty_payment(penalty_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -3158,6 +4264,7 @@ def forgive_penalty_amount(penalty_id):
 
 
 @app.route('/api/penalties/<int:penalty_id>', methods=['PUT', 'DELETE'])
+@require_admin
 def edit_penalty(penalty_id):
     db = get_db()
     group_id = get_current_group_id()
@@ -3236,6 +4343,7 @@ def edit_penalty(penalty_id):
     
 
 @app.route('/penalties-page/download', methods=['GET'])
+@require_treasurer_or_above
 def download_penalties_pdf():
     db = get_db()
     group_id = get_current_group_id()
@@ -3311,10 +4419,24 @@ def download_penalties_pdf():
 # ==================== PROFITS ====================
 
 @app.route('/profits-page')
+@require_admin
 def profits_page():
+    db       = get_db()
+    group_id = get_current_group_id()
+    cursor   = get_cursor(db)
+    cursor.execute(
+        "SELECT profits_unlocked FROM groups WHERE id = %s",
+        (group_id,)
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    unlocked = row and row.get('profits_unlocked')
+    if not unlocked:
+        return render_template('profits_locked.html')
     return render_template('profits.html')
 
 @app.route('/api/profits', methods=['POST'])
+@require_admin
 def calculate_profits():
     db = get_db()
     group_id = get_current_group_id()
@@ -3427,32 +4549,28 @@ def calculate_profits():
 # ==================== REPORTS ====================
 
 @app.route('/reports-page')
+@require_treasurer_or_above
 def reports_page():
     return render_template("reports.html")
 
 @app.route('/api/reports', methods=['GET'])
+@require_treasurer_or_above
 def get_report_data():
     db = get_db()
     group_id = get_current_group_id()
     
     if not group_id:
         return jsonify({"error": "No group selected"}), 400
-    
-    profit_data = get_current_group_profit(db, group_id)
-    total_profit = profit_data["net_profit_pool"]
-    
-    total_units = get_total_hisa_units(db, group_id)
-    profit_per_unit = total_profit / total_units if total_units > 0 else 0
-    
+
     admin_id = get_group_admin_member_id(db, group_id)
 
     cursor = get_cursor(db)
     cursor.execute(
-        "SELECT id, name FROM members WHERE group_id = %s AND is_system = 0", 
+        "SELECT id, name FROM members WHERE group_id = %s",
         (group_id,)
     )
     members = cursor.fetchall()
-    
+
     report_data = []
 
     for m in members:
@@ -3482,13 +4600,10 @@ def get_report_data():
         total_penalties_due = get_total_penalties_due_for_member(member_id, db, group_id)
         
         net_contribution_position = (
-            member_total_savings 
+            member_total_savings
             - loan_balances["remaining_loans"]
             - total_penalties_due
         )
-        
-        expected_profit_share = round(member_units * profit_per_unit)
-        net_payout = net_contribution_position + expected_profit_share
 
         report_data.append({
             "member_name": m["name"],
@@ -3502,8 +4617,6 @@ def get_report_data():
             "total_overdue": loan_balances["total_overdue"],
             "total_penalties": total_penalties_due,
             "net_contribution_position": net_contribution_position,
-            "expected_profit_share": expected_profit_share,
-            "net_payout": net_payout,
         })
 
     cursor.close()
@@ -3511,6 +4624,7 @@ def get_report_data():
 
 
 @app.route('/reports-page/download', methods=['GET'])
+@require_treasurer_or_above
 def download_report_pdf():
     db = get_db()
     group_id = get_current_group_id()
@@ -3608,6 +4722,7 @@ def download_report_pdf():
 # ==================== BACKUP & EXPORT ====================
 
 @app.route('/api/backup/export', methods=['GET'])
+@require_admin
 def export_raw_backup():
     db = get_db()
     group_id = get_current_group_id()
