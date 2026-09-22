@@ -668,96 +668,43 @@ def update_loan_status(db, loan_id, group_id):
     cursor.close()
 
 
-def auto_freeze_settled_month_penalties(db, loan_id, group_id):
-    """
-    For a given loan, find every monthly-rejesho-late penalty row that is now
-    fully paid (amount_paid >= amount) and freeze it so accrual stops.
-    Also freeze any month whose cumulative rejesho target is reached.
-    """
-    cursor = get_cursor(db)
-    cursor.execute(
-        "SELECT id, principal, months FROM loans WHERE id = %s AND group_id = %s",
-        (loan_id, group_id)
-    )
-    loan = cursor.fetchone()
-    if not loan:
-        cursor.close()
-        return
-
-    monthly_rejesho = float(loan['principal']) / int(loan['months'])
-
-    # Total ever paid on this loan
-    cursor.execute(
-        "SELECT COALESCE(SUM(amount), 0) FROM rejesho WHERE loan_id = %s AND group_id = %s",
-        (loan_id, group_id)
-    )
-    total_paid = float(get_single_value(cursor, 0))
-
-    # Find each open penalty row for this loan
-    cursor.execute("""
-        SELECT id, month_num, amount, COALESCE(amount_paid, 0) AS amount_paid,
-               COALESCE(is_frozen, 0) AS is_frozen
-        FROM penalties
-        WHERE loan_id = %s AND group_id = %s
-          AND type = 'monthly_rejesho_late'
-          AND COALESCE(is_frozen, 0) = 0
-    """, (loan_id, group_id))
-    rows = cursor.fetchall()
-
-    for row in rows:
-        mn = row['month_num']
-        if mn is None:
-            cursor.close()
-            return  # month_num column not yet added — skip silently
-
-        cumulative_target = monthly_rejesho * mn
-        slot_settled = total_paid >= cumulative_target - 1.0
-
-        if slot_settled:
-            cursor.execute(
-                "UPDATE penalties SET is_frozen = 1 WHERE id = %s",
-                (row['id'],)
-            )
-
-    cursor.close()
-
-
 def auto_insert_loan_penalties(db, group_id):
     """
     For every active/overdue loan, charge daily_penalty TZS/day for each
     monthly rejesho slot that is past due and not yet fully paid.
 
-    Algorithm (clean, no mercy thresholds):
-    1. For each overdue month slot, find the date cumulative rejesho first
-       reached that slot's target (coverage_date).
-    2. If covered: penalty = (coverage_date - due_date) * daily_rate, then FROZEN.
-    3. If not covered: penalty = (today - due_date) * daily_rate, accruing.
-    4. Paid fully on time → no penalty (slot skipped).
-    5. Penalty amount NEVER decreases once recorded.
-    6. Frozen slots are never touched.
+    Flat rate only — no mercy thresholds anywhere in this function.
+
+    SELF-HEALING: every slot without real payment or forgiveness activity
+    is deleted and recomputed from scratch on every single run,
+    REGARDLESS of its previous is_frozen state. is_frozen is not trusted
+    as "correct forever" — it only reflects the state of the LAST
+    recompute. This exists because stale freezes have been found in
+    production (rows frozen years ago under old rule versions, or before
+    a later rejesho edit/delete changed the true payment history, that
+    then never got revisited). Only a row with real amount_paid > 0 or
+    forgiven_amount > 0 is left completely untouched — that reflects a
+    genuine transaction and must never be silently erased.
+
+    Algorithm, per month slot:
+    1. Find the date cumulative rejesho first reached that slot's target
+       (coverage_date).
+    2. Covered by the due date -> no penalty, no row.
+    3. Covered late -> penalty = (coverage_date - due_date) * daily_rate,
+       frozen (this will recompute to the same number every run, since
+       it's derived from fixed historical dates).
+    4. Not yet covered -> penalty = (today - due_date) * daily_rate,
+       still accruing.
 
     Requires: penalties.month_num column (INTEGER).
-    Run migration 002 in Supabase first:
-        ALTER TABLE penalties ADD COLUMN IF NOT EXISTS month_num INTEGER;
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_penalties_loan_month
-            ON penalties (loan_id, month_num, type)
-            WHERE type = 'monthly_rejesho_late';
+
+    Returns: list of {loan_id, month_num, reason} for rows left untouched
+    due to real payment/forgiveness activity, worth a manual look.
     """
-    # First: freeze any slots whose cumulative target is now met
-    cursor_ids = get_cursor(db)
-    cursor_ids.execute(
-        "SELECT id FROM loans WHERE group_id = %s AND status IN ('Active', 'Overdue')",
-        (group_id,)
-    )
-    loan_ids = [r["id"] for r in cursor_ids.fetchall()]
-    cursor_ids.close()
-
-    for lid in loan_ids:
-        auto_freeze_settled_month_penalties(db, lid, group_id)
-
     settings      = get_group_settings(db, group_id)
     daily_penalty = float(settings.get("daily_penalty_amount", 1000))
     today         = datetime.now().date()
+    TOLERANCE     = 1.0
 
     cursor = get_cursor(db)
     cursor.execute("""
@@ -766,6 +713,8 @@ def auto_insert_loan_penalties(db, group_id):
         WHERE l.group_id = %s AND l.status IN ('Active', 'Overdue')
     """, (group_id,))
     active_loans = cursor.fetchall()
+
+    skipped_for_review = []
 
     for loan in active_loans:
         loan_id         = loan['id']
@@ -781,7 +730,6 @@ def auto_insert_loan_penalties(db, group_id):
             base_month += 12
             base_year  -= 1
 
-        # Fetch all rejesho payments for this loan once, sorted by date
         cursor.execute("""
             SELECT amount, date FROM rejesho
             WHERE loan_id = %s AND group_id = %s
@@ -789,7 +737,6 @@ def auto_insert_loan_penalties(db, group_id):
         """, (loan_id, group_id))
         payments = [(float(r['amount']), datetime.strptime(r['date'], "%Y-%m-%d").date())
                     for r in cursor.fetchall()]
-        total_paid_overall = sum(a for a, _ in payments)
 
         for month_num in range(1, months + 1):
             dm = base_month + month_num
@@ -797,7 +744,6 @@ def auto_insert_loan_penalties(db, group_id):
             if dm > 12:
                 dm -= 12
                 dy += 1
-
             month_due_date = datetime(
                 dy, dm, min(base_day, calendar.monthrange(dy, dm)[1])
             ).date()
@@ -805,37 +751,34 @@ def auto_insert_loan_penalties(db, group_id):
             if today <= month_due_date:
                 continue  # not due yet
 
-            days_late_today = (today - month_due_date).days
-            if days_late_today <= 0:
-                continue
-
-            TOLERANCE   = 1.0
-            target      = monthly_rejesho * month_num   # cumulative expected by this slot
-
-            # Check existing penalty row (match by loan_id + month_num)
+            # Real activity on the existing row? Then hands off.
             cursor.execute("""
-                SELECT id, amount, COALESCE(amount_paid, 0) AS amount_paid,
-                       COALESCE(is_frozen, 0) AS is_frozen
+                SELECT id, COALESCE(amount_paid, 0) AS amount_paid,
+                       COALESCE(forgiven_amount, 0) AS forgiven_amount
                 FROM penalties
                 WHERE loan_id = %s AND group_id = %s
-                  AND type = 'monthly_rejesho_late'
-                  AND month_num = %s
+                  AND type = 'monthly_rejesho_late' AND month_num = %s
             """, (loan_id, group_id, month_num))
             existing = cursor.fetchone()
 
-            # Frozen → already settled, never touch
-            if existing and existing['is_frozen']:
+            if existing and (existing['amount_paid'] > 0 or existing['forgiven_amount'] > 0):
+                skipped_for_review.append({
+                    "loan_id": loan_id, "month_num": month_num,
+                    "reason": f"has amount_paid={existing['amount_paid']}, "
+                              f"forgiven_amount={existing['forgiven_amount']} — left untouched"
+                })
                 continue
 
-            # Paid in full on time → no penalty
+            # Safe to recompute from scratch — clear whatever was there,
+            # frozen or not, and rebuild it below.
+            if existing:
+                cursor.execute("DELETE FROM penalties WHERE id = %s", (existing['id'],))
+
+            target      = monthly_rejesho * month_num
             paid_by_due = sum(a for a, d in payments if d <= month_due_date)
             if paid_by_due >= target - TOLERANCE:
-                # Slot was covered on time — delete any zero-amount accidental row
-                if existing and existing['amount'] == 0:
-                    cursor.execute("DELETE FROM penalties WHERE id = %s", (existing['id'],))
-                continue
+                continue  # covered on time -> no penalty
 
-            # Find coverage date: first date cumulative payments reached this slot's target
             coverage_date = None
             cumul = 0.0
             for amt, pdate in payments:
@@ -844,79 +787,46 @@ def auto_insert_loan_penalties(db, group_id):
                     coverage_date = pdate
                     break
 
-            # ── FLAT RATE — no mercy thresholds of any kind ──
-            # Anything not fully covered by the due date is late, full stop.
             if coverage_date is not None:
-                # Covered fully, but after the due date -> flat rate, frozen
-                # for good (never touched again once frozen).
-                freeze_days    = (coverage_date - month_due_date).days
-                penalty_amount = max(0, round(freeze_days * daily_penalty))
+                late_days      = (coverage_date - month_due_date).days
+                penalty_amount = max(0, round(late_days * daily_penalty))
                 should_freeze  = True
             else:
-                # Not yet fully covered -> flat rate, still accruing daily
-                penalty_amount = round(days_late_today * daily_penalty)
+                late_days      = (today - month_due_date).days
+                penalty_amount = round(late_days * daily_penalty)
                 should_freeze  = False
 
-            if penalty_amount <= 0 and not should_freeze:
+            if penalty_amount <= 0:
                 continue
 
-            desc = (f"Month {month_num} rejesho overdue by "
-                    f"{(coverage_date - month_due_date).days if coverage_date else days_late_today} days"
+            desc = (f"Month {month_num} rejesho overdue by {late_days} days"
                     + (" — settled late" if coverage_date else ""))
 
-            if existing:
-                # Never reduce an existing amount
-                new_amount = max(existing['amount'], penalty_amount)
-                updates = []
-                params  = []
-                if new_amount > existing['amount']:
-                    updates.append("amount = %s"); params.append(new_amount)
-                    updates.append("description = %s"); params.append(desc)
-                    updates.append("date = %s"); params.append(today.strftime("%Y-%m-%d"))
-                if should_freeze and not existing['is_frozen']:
-                    updates.append("is_frozen = 1")
-                if updates:
-                    params.append(existing['id'])
-                    cursor.execute(
-                        f"UPDATE penalties SET {', '.join(updates)} WHERE id = %s",
-                        params
-                    )
-            else:
-                cursor.execute("""
-                    INSERT INTO penalties (
-                        group_id, member_id, loan_id, type,
-                        month_num, amount, description, date,
-                        is_frozen
-                    )
-                    VALUES (%s, %s, %s, 'monthly_rejesho_late',
-                            %s, %s, %s, %s, %s)
-                    ON CONFLICT (loan_id, month_num, type) DO UPDATE
-                        SET amount      = GREATEST(penalties.amount, EXCLUDED.amount),
-                            description = EXCLUDED.description,
-                            date        = EXCLUDED.date,
-                            is_frozen   = GREATEST(penalties.is_frozen, EXCLUDED.is_frozen)
-                """, (
-                    group_id, member_id, loan_id,
-                    month_num, penalty_amount, desc,
-                    today.strftime("%Y-%m-%d"),
-                    1 if should_freeze else 0
-                ))
+            cursor.execute("""
+                INSERT INTO penalties (
+                    group_id, member_id, loan_id, type,
+                    month_num, amount, description, date, is_frozen
+                )
+                VALUES (%s, %s, %s, 'monthly_rejesho_late', %s, %s, %s, %s, %s)
+            """, (
+                group_id, member_id, loan_id,
+                month_num, penalty_amount, desc,
+                today.strftime("%Y-%m-%d"),
+                1 if should_freeze else 0
+            ))
 
         # Update loan status
-        cursor.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM rejesho WHERE loan_id = %s AND group_id = %s",
-            (loan_id, group_id)
-        )
-        total_paid_overall = float(get_single_value(cursor, 0))
+        total_paid_overall = sum(a for a, _ in payments)
         remaining = float(loan['principal']) - total_paid_overall
 
         if remaining <= 0:
             cursor.execute("UPDATE loans SET status = 'Cleared' WHERE id = %s", (loan_id,))
-        elif today > datetime.strptime(loan['due_date'], "%Y-%m-%d").date():
+        elif today > final_due:
             cursor.execute("UPDATE loans SET status = 'Overdue' WHERE id = %s", (loan_id,))
 
     db.commit()
     cursor.close()
+    return skipped_for_review
 
 
 def get_member_loan_balances(db, member_id, group_id):
