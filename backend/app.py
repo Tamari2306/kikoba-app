@@ -372,6 +372,10 @@ def create_new_group(db, group_name, admin_id):
         ('group_name', group_name),
         ('interest_rate', '0.10'),
         ('daily_penalty_amount', '1000'),
+        ('mercy_enabled', '1'),
+        ('mercy_forgive_percent', '90'),
+        ('mercy_half_percent', '75'),
+        ('mercy_half_rate_percent', '50'),
         ('leadership_pay_amount', '0'),
         ('jamii_amount', '2000'),
         ('jamii_frequency', 'monthly'),
@@ -408,6 +412,10 @@ def get_group_settings(db, group_id):
         'group_name': 'Kikoba App',
         'interest_rate': '0.10',
         'daily_penalty_amount': '1000',
+        'mercy_enabled': '1',
+        'mercy_forgive_percent': '90',
+        'mercy_half_percent': '75',
+        'mercy_half_rate_percent': '50',
         'leadership_pay_amount': '0',
         'jamii_amount': '2000',
         'jamii_frequency': 'monthly',
@@ -690,21 +698,53 @@ def auto_insert_loan_penalties(db, group_id):
     1. Find the date cumulative rejesho first reached that slot's target
        (coverage_date).
     2. Covered by the due date -> no penalty, no row.
-    3. Covered late -> penalty = (coverage_date - due_date) * daily_rate,
-       frozen (this will recompute to the same number every run, since
-       it's derived from fixed historical dates).
-    4. Not yet covered -> penalty = (today - due_date) * daily_rate,
-       still accruing.
+    3. Otherwise, the slot's daily penalty runs from its due_date until
+       whichever comes first: it gets fully covered (coverage_date), or
+       its cap_date arrives (the NEXT installment's due date — or, for
+       the loan's last installment, the group's cycle_end_date setting).
+       Reaching the cap freezes the penalty even if the installment is
+       still unpaid — the debt itself doesn't disappear, only that
+       month's daily counter stops. A new counter starts fresh for the
+       next installment.
+    3b. MERCY RULES (per-group settings, can be switched off): judged on
+       the due date only. If >= mercy_forgive_percent (default 90) of the
+       installment was already paid by then -> no penalty at all. Else if
+       >= mercy_half_percent (default 75) -> charged at
+       mercy_half_rate_percent (default 50) of the daily rate. Below
+       that -> full rate. Set mercy_enabled = 0 for strict flat-rate.
+    4. If the loan's last installment has no cycle_end_date to cap
+       against (setting left blank), it falls back to accruing
+       indefinitely, same as before this change — there's nothing to
+       cap it to.
 
     Requires: penalties.month_num column (INTEGER).
 
     Returns: list of {loan_id, month_num, reason} for rows left untouched
     due to real payment/forgiveness activity, worth a manual look.
     """
-    settings      = get_group_settings(db, group_id)
-    daily_penalty = float(settings.get("daily_penalty_amount", 1000))
+    settings        = get_group_settings(db, group_id)
+    daily_penalty   = float(settings.get("daily_penalty_amount", 1000))
+    cycle_end_str   = (settings.get("cycle_end_date") or "").strip()
+    cycle_end_date  = None
+    if cycle_end_str:
+        try:
+            cycle_end_date = datetime.strptime(cycle_end_str, "%Y-%m-%d").date()
+        except ValueError:
+            cycle_end_date = None
     today         = datetime.now().date()
     TOLERANCE     = 1.0
+
+    # ── Per-group mercy rules (all editable in Settings) ──
+    def _setting_num(key, default):
+        try:
+            return float(settings.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    mercy_enabled     = str(settings.get("mercy_enabled", "1")).strip() == "1"
+    mercy_forgive_pct = _setting_num("mercy_forgive_percent", 90) / 100.0   # >= this: no penalty
+    mercy_half_pct    = _setting_num("mercy_half_percent", 75) / 100.0      # >= this: reduced rate
+    mercy_half_rate   = _setting_num("mercy_half_rate_percent", 50) / 100.0 # the reduced rate
 
     cursor = get_cursor(db)
     cursor.execute("""
@@ -730,6 +770,19 @@ def auto_insert_loan_penalties(db, group_id):
             base_month += 12
             base_year  -= 1
 
+        # Precompute every installment's due date up front, so each slot
+        # can look up the NEXT slot's due date as its cap.
+        due_dates = {}
+        for mn in range(1, months + 1):
+            dm = base_month + mn
+            dy = base_year
+            if dm > 12:
+                dm -= 12
+                dy += 1
+            due_dates[mn] = datetime(
+                dy, dm, min(base_day, calendar.monthrange(dy, dm)[1])
+            ).date()
+
         cursor.execute("""
             SELECT amount, date FROM rejesho
             WHERE loan_id = %s AND group_id = %s
@@ -739,17 +792,17 @@ def auto_insert_loan_penalties(db, group_id):
                     for r in cursor.fetchall()]
 
         for month_num in range(1, months + 1):
-            dm = base_month + month_num
-            dy = base_year
-            if dm > 12:
-                dm -= 12
-                dy += 1
-            month_due_date = datetime(
-                dy, dm, min(base_day, calendar.monthrange(dy, dm)[1])
-            ).date()
+            month_due_date = due_dates[month_num]
 
             if today <= month_due_date:
                 continue  # not due yet
+
+            # This slot's cap: the next slot's due date, or for the last
+            # slot, the group's cycle end date (if one is set).
+            if month_num < months:
+                cap_date = due_dates[month_num + 1]
+            else:
+                cap_date = cycle_end_date  # may be None -> no cap
 
             # Real activity on the existing row? Then hands off.
             cursor.execute("""
@@ -779,6 +832,20 @@ def auto_insert_loan_penalties(db, group_id):
             if paid_by_due >= target - TOLERANCE:
                 continue  # covered on time -> no penalty
 
+            # ── MERCY (per-group setting). Judged ONCE, on the due date:
+            # what share of THIS installment was already paid by then?
+            rate_factor = 1.0
+            mercy_note  = ""
+            if mercy_enabled and monthly_rejesho > 0:
+                prev_target = monthly_rejesho * (month_num - 1)
+                slot_by_due = max(0.0, min(paid_by_due - prev_target, monthly_rejesho))
+                pct_by_due  = slot_by_due / monthly_rejesho
+                if pct_by_due + 1e-9 >= mercy_forgive_pct:
+                    continue  # forgiven: enough was paid by the due date
+                elif pct_by_due + 1e-9 >= mercy_half_pct:
+                    rate_factor = mercy_half_rate
+                    mercy_note  = f" (reduced rate: {pct_by_due * 100:.0f}% paid by due date)"
+
             coverage_date = None
             cumul = 0.0
             for amt, pdate in payments:
@@ -788,19 +855,33 @@ def auto_insert_loan_penalties(db, group_id):
                     break
 
             if coverage_date is not None:
-                late_days      = (coverage_date - month_due_date).days
-                penalty_amount = max(0, round(late_days * daily_penalty))
+                # Paid, but late. Freeze at whichever came first: the
+                # payment itself, or the cap date.
+                freeze_at      = min(coverage_date, cap_date) if cap_date else coverage_date
+                late_days      = max(0, (freeze_at - month_due_date).days)
+                penalty_amount = round(late_days * daily_penalty * rate_factor)
+                should_freeze  = True
+            elif cap_date and today >= cap_date:
+                # Still unpaid, but this month's window has closed —
+                # freeze at the cap. The debt remains; the daily counter
+                # for THIS slot stops.
+                late_days      = (cap_date - month_due_date).days
+                penalty_amount = round(late_days * daily_penalty * rate_factor)
                 should_freeze  = True
             else:
+                # Still unpaid, cap not reached yet (or no cap exists for
+                # this slot) -> keep accruing daily.
                 late_days      = (today - month_due_date).days
-                penalty_amount = round(late_days * daily_penalty)
+                penalty_amount = round(late_days * daily_penalty * rate_factor)
                 should_freeze  = False
 
             if penalty_amount <= 0:
                 continue
 
             desc = (f"Month {month_num} rejesho overdue by {late_days} days"
-                    + (" — settled late" if coverage_date else ""))
+                    + (" — settled late" if coverage_date else
+                       " — capped, still unpaid" if should_freeze else "")
+                    + mercy_note)
 
             cursor.execute("""
                 INSERT INTO penalties (
@@ -1231,10 +1312,34 @@ def handle_settings():
     if not data:
         return jsonify({"error": "Invalid JSON data"}), 400
 
+    # ── Mercy-rule settings: validate before saving anything ──
+    mercy_enabled = data.get('mercy_enabled')
+    if mercy_enabled is not None and mercy_enabled != "":
+        mercy_enabled = '1' if str(mercy_enabled).strip().lower() in ('1', 'true', 'yes', 'on') else '0'
+
+    mercy_vals = {}
+    for k in ('mercy_forgive_percent', 'mercy_half_percent', 'mercy_half_rate_percent'):
+        v = data.get(k)
+        if v is not None and v != "":
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return jsonify({"error": f"{k} must be a number"}), 400
+            if not (0 <= fv <= 100):
+                return jsonify({"error": f"{k} must be between 0 and 100"}), 400
+            mercy_vals[k] = fv
+    if ('mercy_forgive_percent' in mercy_vals and 'mercy_half_percent' in mercy_vals
+            and mercy_vals['mercy_half_percent'] > mercy_vals['mercy_forgive_percent']):
+        return jsonify({"error": "Half-penalty percent cannot be higher than the full-forgiveness percent"}), 400
+
     updates = [
         ('group_name', data.get('group_name')),
         ('interest_rate', data.get('interest_rate')),
         ('daily_penalty_amount', data.get('daily_penalty_amount')),
+        ('mercy_enabled', mercy_enabled),
+        ('mercy_forgive_percent', data.get('mercy_forgive_percent')),
+        ('mercy_half_percent', data.get('mercy_half_percent')),
+        ('mercy_half_rate_percent', data.get('mercy_half_rate_percent')),
         ('leadership_pay_amount', data.get('leadership_pay_amount')),
         ('jamii_amount', data.get('jamii_amount')),
         ('jamii_frequency', data.get('jamii_frequency')),
