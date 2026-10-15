@@ -2581,109 +2581,514 @@ def logout():
 
 
 # ==================== SMS REMINDERS ====================
+#
+# Optional per-group settings (settings table, key/value):
+#   sms_reminders_enabled   1 / 0               default 1
+#   sms_reminder_days       "3,1"               days BEFORE a due date
+#   sms_overdue_days        "1"  or "off"       days AFTER a due date
+#   sms_daily_cap           300                 max bulk texts per 24h
+# =====================================================================
+import sms_service
 
+
+# ---------------------------------------------------------------- helpers
+def _eat_today():
+    """Today's date in Tanzania (UTC+3). Render servers run on UTC."""
+    from datetime import timezone
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+
+
+def _ensure_sms_log(db):
+    cur = get_cursor(db)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sms_log (
+            id         SERIAL PRIMARY KEY,
+            group_id   INTEGER NOT NULL,
+            member_id  INTEGER,
+            loan_id    INTEGER,
+            month_num  INTEGER,
+            kind       TEXT NOT NULL,
+            phone      TEXT,
+            message    TEXT,
+            status     TEXT NOT NULL,
+            request_id TEXT,
+            error      TEXT,
+            sent_by    INTEGER,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_sms_log_sent_once
+        ON sms_log (loan_id, month_num, kind) WHERE status = 'sent'
+    """)
+    db.commit()
+    cur.close()
+
+
+def _log_sms(db, group_id, kind, phone, message, result,
+             member_id=None, loan_id=None, month_num=None, sent_by=None):
+    cur = get_cursor(db)
+    cur.execute("""
+        INSERT INTO sms_log (group_id, member_id, loan_id, month_num, kind, phone,
+                             message, status, request_id, error, sent_by)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (group_id, member_id, loan_id, month_num, kind, phone, message,
+          'sent' if result.get('ok') else 'failed',
+          result.get('request_id') or None, result.get('error'), sent_by))
+    db.commit()
+    cur.close()
+
+
+def _sms_group_allowed(db, group_id):
+    """Groups whose subscription is suspended don't get SMS sent for them."""
+    return get_group_subscription_status(db, group_id)["status"] in ("active", "free", "grace")
+
+
+def _sms_sent_last_24h(db, group_id):
+    cur = get_cursor(db)
+    cur.execute("""
+        SELECT COUNT(*) FROM sms_log
+        WHERE group_id = %s AND status = 'sent' AND created_at >= NOW() - INTERVAL '24 hours'
+    """, (group_id,))
+    n = int(get_single_value(cur, 0))
+    cur.close()
+    return n
+
+
+def _parse_days(value, default):
+    text = str(value if value is not None else "").strip().lower()
+    if text in ("off", "none"):
+        return []
+    days = [int(p) for p in text.split(",") if p.strip().isdigit()]
+    return days or list(default)
+
+
+def _first_name(full):
+    first = (str(full or "").strip().split() or [""])[0]
+    return sms_service.ascii_safe(first)[:15].title() or "Mwanachama"
+
+
+def _msg_rejesho_before(name, group, amount, days, due):
+    when = "leo" if days == 0 else "kesho" if days == 1 else f"baada ya siku {days}"
+    return (f"Habari {_first_name(name)}, rejesho yako ya TZS {amount:,.0f} ya "
+            f"{sms_service.ascii_safe(group)[:25]} inatakiwa {when} ({due:%d/%m/%Y}). "
+            f"Tafadhali lipa kwa wakati. Asante.")
+
+
+def _msg_rejesho_overdue(name, group, amount, due):
+    return (f"Habari {_first_name(name)}, rejesho yako ya TZS {amount:,.0f} ya "
+            f"{sms_service.ascii_safe(group)[:25]} ilitakiwa kulipwa tarehe {due:%d/%m/%Y} "
+            f"na bado haijakamilika. Tafadhali lipa haraka. Asante.")
+
+
+# ---------------------------------------------------------------- admin page + status + log
+@app.route('/sms-page')
+@require_admin
+def sms_page():
+    return render_template('sms.html')
+
+
+@app.route('/api/sms/status', methods=['GET'])
+@require_admin
+def sms_status():
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+    _ensure_sms_log(db)
+    settings = get_group_settings(db, group_id)
+    try:
+        cap = int(float(settings.get("sms_daily_cap", 300)))
+    except (TypeError, ValueError):
+        cap = 300
+    return jsonify({
+        "configured":    sms_service.is_configured(),
+        "sender_id":     sms_service.sender_id(),
+        "sent_last_24h": _sms_sent_last_24h(db, group_id),
+        "daily_cap":     cap,
+        "max_chars":     sms_service.MAX_CHARS,
+    })
+
+
+@app.route('/api/sms/log', methods=['GET'])
+@require_admin
+def sms_log_list():
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+    _ensure_sms_log(db)
+    cur = get_cursor(db)
+    cur.execute("""
+        SELECT l.id, l.created_at, l.kind, l.status, l.error, l.phone, l.message,
+               m.name AS member_name
+        FROM sms_log l
+        LEFT JOIN members m ON m.id = l.member_id
+        WHERE l.group_id = %s
+        ORDER BY l.id DESC
+        LIMIT 100
+    """, (group_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    return jsonify({"log": rows})
+
+
+# ---------------------------------------------------------------- bulk SMS
+@app.route('/api/sms/bulk', methods=['POST'])
+@require_admin
+def sms_bulk():
+    """
+    Send one message to many members of the CURRENT group (admin only).
+
+    Body: {
+      "message": "Habari {name}, mkutano kesho saa 4 asubuhi. {group}",
+      "all": true            // or "member_ids": [3, 5, 8]
+      "preview": true        // default true: shows what WOULD happen
+      "confirm": true        // must be true to really send
+    }
+    {name} = member's first name, {group} = group name.
+    """
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+
+    data      = request.get_json(silent=True) or {}
+    template  = sms_service.ascii_safe(data.get("message", ""))
+    preview   = data.get("preview", True) is not False
+    confirm   = data.get("confirm", False) is True
+    send_all  = data.get("all", False) is True
+    raw_ids   = data.get("member_ids") or []
+
+    if not template:
+        return jsonify({"error": "Message is required"}), 400
+    if len(template) > sms_service.MAX_CHARS:
+        return jsonify({"error": f"Message too long (max {sms_service.MAX_CHARS} characters)"}), 400
+    if not send_all and not raw_ids:
+        return jsonify({"error": "Choose 'all members' or select members"}), 400
+    try:
+        member_ids = [int(x) for x in raw_ids]
+    except (TypeError, ValueError):
+        return jsonify({"error": "member_ids must be numbers"}), 400
+
+    if not _sms_group_allowed(db, group_id):
+        return jsonify({"error": "Group subscription is suspended - SMS is disabled"}), 403
+
+    _ensure_sms_log(db)
+    settings   = get_group_settings(db, group_id)
+    group_name = sms_service.ascii_safe(settings.get("group_name", "Kikoba"))[:25]
+    try:
+        cap = int(float(settings.get("sms_daily_cap", 300)))
+    except (TypeError, ValueError):
+        cap = 300
+
+    cur = get_cursor(db)
+    if send_all:
+        cur.execute("""
+            SELECT id, name, phone FROM members
+            WHERE group_id = %s AND is_system = 0 AND COALESCE(is_active, 1) = 1
+            ORDER BY name
+        """, (group_id,))
+    else:
+        cur.execute("""
+            SELECT id, name, phone FROM members
+            WHERE group_id = %s AND is_system = 0 AND COALESCE(is_active, 1) = 1
+              AND id = ANY(%s)
+            ORDER BY name
+        """, (group_id, member_ids))
+    members = cur.fetchall()
+    cur.close()
+
+    items, invalid_phone, too_long, seen = [], [], [], set()
+    for m in members:
+        phone = sms_service.normalize_phone(m['phone'])
+        if not phone:
+            invalid_phone.append(m['name'])
+            continue
+        text = sms_service.ascii_safe(
+            template.replace("{name}", _first_name(m['name'])).replace("{group}", group_name)
+        )
+        if len(text) > sms_service.MAX_CHARS:
+            too_long.append(m['name'])
+            continue
+        if (phone, text) in seen:          # two members sharing one phone number
+            continue
+        seen.add((phone, text))
+        items.append({"member_id": m['id'], "phone": phone, "message": text})
+
+    sent_24h  = _sms_sent_last_24h(db, group_id)
+    sample    = items[0]["message"] if items else ""
+    per_person = sms_service.segments(sample)
+    summary = {
+        "recipients":         len(items),
+        "sms_parts_each":     per_person,
+        "invalid_phone":      invalid_phone,
+        "too_long":           too_long,
+        "sample":             sample,
+        "sent_last_24h":      sent_24h,
+        "daily_cap":          cap,
+        "would_exceed_cap":   sent_24h + len(items) > cap,
+        "configured":         sms_service.is_configured(),
+    }
+
+    if preview or not confirm:
+        return jsonify({"preview": True, **summary})
+
+    # ---- real send ----
+    if not items:
+        return jsonify({"error": "No members with a valid phone number to send to", **summary}), 400
+    if not sms_service.is_configured():
+        return jsonify({"error": "SMS is not configured on the server "
+                                 "(BEEM_API_KEY / BEEM_SECRET_KEY missing)", **summary}), 503
+    if summary["would_exceed_cap"]:
+        return jsonify({"error": f"This would pass the daily limit of {cap} texts "
+                                 f"({sent_24h} already sent in the last 24 hours)", **summary}), 429
+
+    sent_by = session.get("member_id")
+    sent = failed = 0
+    errors = {}
+    results = sms_service.send_many([{"phone": it["phone"], "message": it["message"]} for it in items])
+    for it, res in zip(items, results):
+        _log_sms(db, group_id, "bulk", it["phone"], it["message"], res,
+                 member_id=it["member_id"], sent_by=sent_by)
+        if res["ok"]:
+            sent += 1
+        else:
+            failed += 1
+            errors[res["error"]] = errors.get(res["error"], 0) + 1
+
+    return jsonify({"preview": False, "sent": sent, "failed": failed,
+                    "errors": errors, **summary})
+
+
+# ---------------------------------------------------------------- rejesho reminders (cron)
 @app.route('/api/reminders/loan-due', methods=['POST'])
 def send_loan_due_reminders():
     """
-    Send SMS reminders for loans due in 1 or 3 days.
-    Call this daily via a cron job or scheduler.
-    Owner-token protected.
+    Rejesho reminders. Call once a day from a scheduler.  Owner-token protected.
+
+      ?dry_run=1   show who WOULD be texted, send nothing
+      ?limit=100   max texts per run (a rerun picks up the rest)
+
+    Texts members BEFORE a due date (default 3 and 1 days) and AFTER it
+    (default 1 day) - but only for installments not yet paid, and only the
+    amount still owed on that installment.  Never sends the same text twice.
     """
-    owner_token = request.headers.get("X-Owner-Token", "")
-    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+    expected = os.environ.get("OWNER_TOKEN", "")
+    if not expected or request.headers.get("X-Owner-Token", "") != expected:
         return jsonify({"error": "Unauthorized"}), 403
 
-    db       = get_db()
-    cursor   = get_cursor(db)
-    today    = date.today()
-    sent     = 0
-    errors   = 0
+    payload = request.get_json(silent=True) or {}
+    dry_run = str(request.args.get("dry_run") or payload.get("dry_run") or "").lower() in ("1", "true", "yes")
+    try:
+        limit = int(request.args.get("limit") or payload.get("limit") or 100)
+    except (TypeError, ValueError):
+        limit = 100
 
-    # Find all active loans with monthly due dates in 1 or 3 days
+    if not dry_run and not sms_service.is_configured():
+        return jsonify({"error": "SMS is not configured (BEEM_API_KEY / BEEM_SECRET_KEY missing)"}), 503
+
+    db = get_db()
+    _ensure_sms_log(db)
+    cursor = get_cursor(db)
+    today  = _eat_today()
+
     cursor.execute("""
-        SELECT l.id, l.member_id, l.principal, l.months, l.due_date,
-               m.name AS member_name, m.phone,
-               g.name AS group_name, l.group_id
+        SELECT l.id, l.group_id, l.member_id, l.principal, l.months, l.due_date,
+               m.name AS member_name, m.phone, g.name AS group_name
         FROM loans l
         JOIN members m ON m.id = l.member_id
-        JOIN groups g ON g.id = l.group_id
+        JOIN groups  g ON g.id = l.group_id
         WHERE l.status IN ('Active', 'Overdue')
-          AND m.phone IS NOT NULL
+          AND m.phone IS NOT NULL AND m.phone <> ''
     """)
     loans = cursor.fetchall()
 
-    import calendar as cal
-    for loan in loans:
-        monthly = float(loan['principal']) / int(loan['months'])
-        final_due = datetime.strptime(loan['due_date'], "%Y-%m-%d").date()
-        months = int(loan['months'])
+    group_cfg = {}
 
-        # Check each monthly due date
+    def cfg_for(group_id):
+        if group_id not in group_cfg:
+            s = get_group_settings(db, group_id)
+            group_cfg[group_id] = {
+                "enabled": str(s.get("sms_reminders_enabled", "1")).strip() == "1"
+                           and _sms_group_allowed(db, group_id),
+                "before":  [d for d in _parse_days(s.get("sms_reminder_days"), [3, 1])],
+                "overdue": _parse_days(s.get("sms_overdue_days"), [1]),
+            }
+        return group_cfg[group_id]
+
+    stats = {"sent": 0, "failed": 0, "skipped_paid": 0, "skipped_already_sent": 0,
+             "skipped_group_off": 0, "skipped_bad_phone": 0, "held_back_by_limit": 0}
+    preview = []
+    pending = []
+    budget  = limit
+
+    for loan in loans:
+        cfg = cfg_for(loan['group_id'])
+        if not cfg["enabled"]:
+            stats["skipped_group_off"] += 1
+            continue
+
+        phone = sms_service.normalize_phone(loan['phone'])
+        if not phone:
+            stats["skipped_bad_phone"] += 1
+            continue
+
+        months    = int(loan['months'])
+        monthly   = float(loan['principal']) / months
+        final_due = datetime.strptime(loan['due_date'], "%Y-%m-%d").date()
         base_month = final_due.month - months
         base_year  = final_due.year
         if base_month <= 0:
             base_month += 12
             base_year  -= 1
 
+        cursor.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS paid FROM rejesho WHERE loan_id = %s AND group_id = %s",
+            (loan['id'], loan['group_id'])
+        )
+        total_paid = float(get_single_value(cursor, 0))
+
         for mn in range(1, months + 1):
             dm, dy = base_month + mn, base_year
-            if dm > 12: dm -= 12; dy += 1
-            due = date(dy, dm, min(final_due.day, cal.monthrange(dy, dm)[1]))
+            if dm > 12:
+                dm -= 12
+                dy += 1
+            due   = date(dy, dm, min(final_due.day, calendar.monthrange(dy, dm)[1]))
+            delta = (due - today).days
 
-            days_until = (due - today).days
-            if days_until in (1, 3):
-                ok = send_loan_due_reminder(
-                    phone=loan['phone'],
-                    member_name=loan['member_name'],
-                    group_name=loan['group_name'],
-                    days_until_due=days_until,
-                    monthly_amount=monthly,
-                    due_date=due
-                )
-                if ok: sent += 1
-                else:  errors += 1
+            if delta >= 0 and delta in cfg["before"]:
+                kind = f"rejesho_before_{delta}"
+            elif delta < 0 and -delta in cfg["overdue"]:
+                kind = f"rejesho_overdue_{-delta}"
+            else:
+                continue
+
+            # Still owed on THIS installment (oldest-first allocation).
+            target      = monthly * mn
+            prev_target = monthly * (mn - 1)
+            remaining   = min(monthly, target - max(total_paid, prev_target))
+            if remaining <= 1.0:
+                stats["skipped_paid"] += 1
+                continue
+
+            cursor.execute(
+                "SELECT 1 FROM sms_log WHERE loan_id = %s AND month_num = %s AND kind = %s AND status = 'sent'",
+                (loan['id'], mn, kind)
+            )
+            if cursor.fetchone():
+                stats["skipped_already_sent"] += 1
+                continue
+
+            amount = round(remaining)
+            if kind.startswith("rejesho_before"):
+                text = _msg_rejesho_before(loan['member_name'], loan['group_name'], amount, delta, due)
+            else:
+                text = _msg_rejesho_overdue(loan['member_name'], loan['group_name'], amount, due)
+
+            if budget <= 0:
+                stats["held_back_by_limit"] += 1
+                continue
+            budget -= 1
+
+            if dry_run:
+                preview.append({"loan_id": loan['id'], "member": loan['member_name'],
+                                "phone": "..." + phone[-3:], "month_num": mn, "kind": kind,
+                                "amount": amount, "message": text})
+                continue
+
+            pending.append({"phone": phone, "message": text, "kind": kind,
+                            "group_id": loan['group_id'], "member_id": loan['member_id'],
+                            "loan_id": loan['id'], "month_num": mn})
 
     cursor.close()
-    return jsonify({"status": "success", "sent": sent, "errors": errors})
+
+    if pending:
+        results = sms_service.send_many([{"phone": p["phone"], "message": p["message"]} for p in pending])
+        for p, res in zip(pending, results):
+            _log_sms(db, p["group_id"], p["kind"], p["phone"], p["message"], res,
+                     member_id=p["member_id"], loan_id=p["loan_id"], month_num=p["month_num"])
+            stats["sent" if res["ok"] else "failed"] += 1
+
+    result = {"status": "success", "dry_run": dry_run, "today": today.isoformat(), **stats}
+    if dry_run:
+        result["would_send"] = preview
+    return jsonify(result)
 
 
+# ---------------------------------------------------------------- subscription reminders (cron)
 @app.route('/api/reminders/subscription-due', methods=['POST'])
 def send_subscription_due_reminders():
-    """Send SMS to admins 3 days before subscription expires."""
-    owner_token = request.headers.get("X-Owner-Token", "")
-    if owner_token != os.environ.get("OWNER_TOKEN", ""):
+    """Text group admins 3 days before their subscription expires. Owner-token protected."""
+    expected = os.environ.get("OWNER_TOKEN", "")
+    if not expected or request.headers.get("X-Owner-Token", "") != expected:
         return jsonify({"error": "Unauthorized"}), 403
 
-    db     = get_db()
+    payload = request.get_json(silent=True) or {}
+    dry_run = str(request.args.get("dry_run") or payload.get("dry_run") or "").lower() in ("1", "true", "yes")
+    if not dry_run and not sms_service.is_configured():
+        return jsonify({"error": "SMS is not configured (BEEM_API_KEY / BEEM_SECRET_KEY missing)"}), 503
+
+    db = get_db()
+    _ensure_sms_log(db)
     cursor = get_cursor(db)
-    today  = date.today()
-    warn   = today + timedelta(days=3)
-    sent   = 0
+    warn   = _eat_today() + timedelta(days=3)
+    sent = failed = skipped = 0
+    preview = []
 
     cursor.execute("""
-        SELECT g.id, g.name, g.subscription_expires,
-               m.name AS admin_name, m.phone, m.group_id,
-               (SELECT COUNT(*) FROM members WHERE group_id=g.id AND is_system=0) AS member_count
+        SELECT g.id AS group_id, g.name, g.subscription_expires,
+               m.id AS member_id, m.name AS admin_name, m.phone,
+               (SELECT COUNT(*) FROM members
+                 WHERE group_id = g.id AND is_system = 0 AND COALESCE(is_active, 1) = 1) AS member_count
         FROM groups g
         JOIN members m ON m.group_id = g.id AND m.role = 'admin'
-        WHERE g.is_free = 0
+        WHERE COALESCE(g.is_free, 0) = 0
           AND g.subscription_expires = %s
-          AND m.phone IS NOT NULL
+          AND m.phone IS NOT NULL AND m.phone <> ''
     """, (warn,))
 
     for row in cursor.fetchall():
-        amount_due = int(row['member_count']) * 1000
-        ok = send_subscription_reminder_sms(
-            phone=row['phone'],
-            admin_name=row['admin_name'],
-            group_name=row['name'],
-            amount_due=amount_due,
-            due_date=row['subscription_expires']
-        )
-        if ok: sent += 1
+        phone = sms_service.normalize_phone(row['phone'])
+        if not phone:
+            skipped += 1
+            continue
+
+        cursor.execute("""
+            SELECT 1 FROM sms_log
+            WHERE group_id = %s AND member_id = %s AND kind = 'subscription_before_3'
+              AND status = 'sent' AND created_at >= NOW() - INTERVAL '2 days'
+        """, (row['group_id'], row['member_id']))
+        if cursor.fetchone():
+            skipped += 1
+            continue
+
+        amount = int(row['member_count']) * RATE_PER_MEMBER
+        expiry = row['subscription_expires']
+        if isinstance(expiry, str):
+            expiry = datetime.strptime(expiry[:10], "%Y-%m-%d").date()
+        text = (f"Habari {_first_name(row['admin_name'])}, usajili wa "
+                f"{sms_service.ascii_safe(row['name'])[:25]} unaisha tarehe {expiry:%d/%m/%Y}. "
+                f"Kiasi: TZS {amount:,.0f}. Tafadhali lipa ili kuendelea kutumia mfumo. Asante.")
+
+        if dry_run:
+            preview.append({"group": row['name'], "admin": row['admin_name'],
+                            "phone": "..." + phone[-3:], "message": text})
+            continue
+
+        res = sms_service.send_one(phone, text)
+        _log_sms(db, row['group_id'], "subscription_before_3", phone, text, res,
+                 member_id=row['member_id'])
+        if res["ok"]:
+            sent += 1
+        else:
+            failed += 1
 
     cursor.close()
-    return jsonify({"status": "success", "sent": sent})
+    result = {"status": "success", "dry_run": dry_run, "sent": sent, "failed": failed, "skipped": skipped}
+    if dry_run:
+        result["would_send"] = preview
+    return jsonify(result)
 
 # ==================== MEMBERS ====================
 @app.route('/members-page')
@@ -4813,6 +5218,552 @@ def export_raw_backup():
         as_attachment=True,
         download_name=f"Kikoba_Backup_Group_{group_id}_{datetime.now().strftime('%Y-%m-%d')}.zip"
     )
+
+# =====================================================================
+# ACCOUNTABILITY  -  "Money Check"
+
+import json
+
+_ACC_READY = False
+
+
+def _acc_today():
+    """Today's date in Tanzania (UTC+3). Render servers run on UTC."""
+    from datetime import timezone
+    return (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+
+
+def _acc_ensure(db):
+    """Create the two tables on first use (safe to run every time)."""
+    global _ACC_READY
+    if _ACC_READY:
+        return
+    cur = get_cursor(db)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS balance_checks (
+            id               SERIAL PRIMARY KEY,
+            group_id         INTEGER NOT NULL,
+            as_of            TEXT NOT NULL,
+            actual_balance   NUMERIC NOT NULL,
+            expected_balance NUMERIC NOT NULL,
+            difference       NUMERIC NOT NULL,
+            tolerance        NUMERIC NOT NULL,
+            status           TEXT NOT NULL,
+            components       TEXT,
+            statement_ref    TEXT,
+            note             TEXT,
+            entered_by       INTEGER,
+            entered_by_name  TEXT,
+            entered_by_role  TEXT,
+            created_at       TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          SERIAL PRIMARY KEY,
+            group_id    INTEGER NOT NULL,
+            actor_id    INTEGER,
+            actor_name  TEXT,
+            actor_role  TEXT,
+            action      TEXT NOT NULL,
+            summary     TEXT NOT NULL,
+            created_at  TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_balance_checks_group ON balance_checks (group_id, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_group ON audit_log (group_id, id DESC)")
+    db.commit()
+    cur.close()
+    _ACC_READY = True
+
+
+def _n(value):
+    return float(value or 0)
+
+
+# ---------------------------------------------------------------- the maths
+def compute_expected_balance(db, group_id, as_of):
+    """
+    What the group's account SHOULD hold on `as_of` (YYYY-MM-DD), judging
+    only by the records in the app.  Amounts are cast to NUMERIC first
+    because several columns are `real` (float) and lose cents on big sums.
+    """
+    cur = get_cursor(db)
+
+    cur.execute("""
+        SELECT c.type, COALESCE(SUM(c.amount::numeric), 0) AS total
+        FROM contributions c
+        WHERE c.group_id = %s
+          AND COALESCE(NULLIF(c.transaction_date::text, ''), c.date::text) <= %s
+        GROUP BY c.type
+    """, (group_id, as_of))
+    by_type = {r['type']: _n(r['total']) for r in cur.fetchall()}
+
+    cur.execute("""
+        SELECT COALESCE(SUM(r.amount::numeric), 0) AS total
+        FROM rejesho r
+        WHERE r.group_id = %s AND r.date::text <= %s
+    """, (group_id, as_of))
+    rejesho = _n(get_single_value(cur, 0))
+
+    cur.execute("""
+        SELECT COALESCE(SUM(COALESCE(l.net_amount, l.principal - COALESCE(l.interest, 0))::numeric), 0) AS total,
+               COUNT(*) AS n
+        FROM loans l
+        WHERE l.group_id = %s AND l.start_date::text <= %s
+    """, (group_id, as_of))
+    row = cur.fetchone()
+    loans_out, loans_n = _n(row['total']), int(row['n'])
+    cur.close()
+
+    hisa_anzia = by_type.pop('hisa anzia', 0.0)
+    hisa       = by_type.pop('hisa', 0.0)
+    jamii      = by_type.pop('jamii', 0.0)
+    penalties  = by_type.pop('penalty_payment', 0.0)
+    expenses   = -by_type.pop('jamii_deduction', 0.0)     # stored as negative amounts
+    other      = sum(by_type.values())
+
+    money_in  = hisa_anzia + hisa + jamii + penalties + other + rejesho
+    money_out = loans_out + expenses
+
+    return {
+        "as_of": as_of,
+        "money_in": {
+            "hisa_anzia": round(hisa_anzia), "hisa": round(hisa), "jamii": round(jamii),
+            "penalty_payments": round(penalties), "other": round(other),
+            "rejesho": round(rejesho), "total": round(money_in),
+        },
+        "money_out": {
+            "loans_paid_out": round(loans_out), "loans_count": loans_n,
+            "expenses": round(expenses), "total": round(money_out),
+        },
+        "expected_balance": round(money_in - money_out),
+    }
+
+
+def _acc_status(difference, tolerance):
+    if abs(difference) <= tolerance:
+        return "matched"
+    return "short" if difference < 0 else "over"
+
+
+def integrity_checks(db, group_id):
+    """Checks the books against themselves. No M-Koba number needed."""
+    checks = []
+    cur = get_cursor(db)
+
+    # 1. Penalty money is recorded in two places; they must agree.
+    cur.execute("SELECT COALESCE(SUM(amount::numeric),0) AS t FROM contributions WHERE group_id=%s AND type='penalty_payment'", (group_id,))
+    pay_in_cash = _n(get_single_value(cur, 0))
+    cur.execute("SELECT COALESCE(SUM(COALESCE(amount_paid,0)::numeric),0) AS t FROM penalties WHERE group_id=%s", (group_id,))
+    pay_in_penalties = _n(get_single_value(cur, 0))
+    gap = pay_in_cash - pay_in_penalties
+    ok = abs(gap) <= 1
+    checks.append({"key": "penalty_ledger", "level": "ok" if ok else "bad",
+        "label": "Penalty payments agree in both records",
+        "detail": ("Cash received for penalties matches what is marked paid." if ok else
+                   f"Cash records show {pay_in_cash:,.0f} TZS of penalty payments but penalties are marked paid for "
+                   f"{pay_in_penalties:,.0f} TZS (difference {gap:,.0f} TZS).")})
+
+    # 2 + 3. Loans: overpaid, or marked Cleared while money is still owed.
+    cur.execute("""
+        SELECT l.id, l.status, l.principal::numeric AS principal, COALESCE(r.paid, 0) AS paid, m.name
+        FROM loans l
+        JOIN members m ON m.id = l.member_id
+        LEFT JOIN (SELECT loan_id, SUM(amount::numeric) AS paid FROM rejesho
+                   WHERE group_id = %s GROUP BY loan_id) r ON r.loan_id = l.id
+        WHERE l.group_id = %s
+    """, (group_id, group_id))
+    loans = cur.fetchall()
+    overpaid = [x for x in loans if _n(x['paid']) > _n(x['principal']) + 1]
+    cleared_unpaid = [x for x in loans if x['status'] == 'Cleared' and _n(x['paid']) < _n(x['principal']) - 1]
+    checks.append({"key": "loans_overpaid", "level": "ok" if not overpaid else "warn",
+        "label": "No loan has been paid more than it was",
+        "detail": "All loans are within their amount." if not overpaid else
+                  "Check these loans: " + ", ".join(f"{x['name']} (loan #{x['id']})" for x in overpaid[:5])})
+    checks.append({"key": "cleared_but_unpaid", "level": "ok" if not cleared_unpaid else "bad",
+        "label": "No loan is marked Cleared while money is still owed",
+        "detail": "Every cleared loan is fully paid." if not cleared_unpaid else
+                  "Marked Cleared but not fully paid: " + ", ".join(
+                      f"{x['name']} (loan #{x['id']}, owes {_n(x['principal']) - _n(x['paid']):,.0f} TZS)"
+                      for x in cleared_unpaid[:5])})
+
+    # 4. Zero or negative amounts hide things.
+    cur.execute("SELECT COUNT(*) AS c FROM contributions WHERE group_id=%s AND type != 'jamii_deduction' AND amount::numeric <= 0", (group_id,))
+    bad_c = int(get_single_value(cur, 0))
+    cur.execute("SELECT COUNT(*) AS c FROM rejesho WHERE group_id=%s AND amount::numeric <= 0", (group_id,))
+    bad_r = int(get_single_value(cur, 0))
+    checks.append({"key": "non_positive", "level": "ok" if not (bad_c or bad_r) else "bad",
+        "label": "No zero or negative payments",
+        "detail": "None found." if not (bad_c or bad_r) else f"{bad_c + bad_r} entries have a zero or negative amount."})
+
+    # 5. Possible double entries (a warning only: two real payments can look alike).
+    cur.execute("""SELECT COUNT(*) AS c FROM (SELECT 1 FROM rejesho WHERE group_id=%s
+                   GROUP BY loan_id, amount, date HAVING COUNT(*) > 1) d""", (group_id,))
+    dup_r = int(get_single_value(cur, 0))
+    cur.execute("""SELECT COUNT(*) AS c FROM (SELECT 1 FROM contributions WHERE group_id=%s
+                   GROUP BY member_id, type, amount, COALESCE(transaction_date::text, date::text)
+                   HAVING COUNT(*) > 1) d""", (group_id,))
+    dup_c = int(get_single_value(cur, 0))
+    checks.append({"key": "duplicates", "level": "ok" if not (dup_r or dup_c) else "warn",
+        "label": "No possible double entries",
+        "detail": "None found." if not (dup_r or dup_c) else
+                  f"{dup_r + dup_c} groups of identical entries (same person, amount and date). Check they are real."})
+
+    cur.close()
+    return checks
+
+
+def fairness_summary(db, group_id):
+    cur = get_cursor(db)
+    cur.execute("""
+        SELECT COALESCE(SUM(amount::numeric),0) AS imposed,
+               COALESCE(SUM(COALESCE(amount_paid,0)::numeric),0) AS paid,
+               COALESCE(SUM(COALESCE(forgiven_amount,0)::numeric),0) AS forgiven,
+               COUNT(*) FILTER (WHERE COALESCE(forgiven_amount,0) > 0) AS forgiven_count
+        FROM penalties WHERE group_id = %s AND type != 'loan_forgiven'
+    """, (group_id,))
+    p = cur.fetchone()
+    imposed, paid, forgiven = _n(p['imposed']), _n(p['paid']), _n(p['forgiven'])
+
+    cur.execute("""
+        SELECT m.id, m.name,
+               GREATEST(l.principal::numeric - COALESCE(r.paid, 0), 0) AS outstanding
+        FROM loans l
+        JOIN members m ON m.id = l.member_id
+        LEFT JOIN (SELECT loan_id, SUM(amount::numeric) AS paid FROM rejesho
+                   WHERE group_id = %s GROUP BY loan_id) r ON r.loan_id = l.id
+        WHERE l.group_id = %s AND l.status != 'Forgiven'
+    """, (group_id, group_id))
+    per_member = {}
+    for row in cur.fetchall():
+        d = per_member.setdefault(row['id'], {"name": row['name'], "owed": 0.0})
+        d["owed"] += _n(row['outstanding'])
+    ranked = sorted((v for v in per_member.values() if v["owed"] > 0), key=lambda v: -v["owed"])
+    total_owed = sum(v["owed"] for v in ranked)
+    top3 = ranked[:3]
+    top3_share = (sum(v["owed"] for v in top3) / total_owed * 100) if total_owed else 0
+
+    cur.execute("""
+        SELECT action, COUNT(*) AS c FROM audit_log
+        WHERE group_id = %s AND created_at >= NOW() - INTERVAL '30 days'
+        GROUP BY action
+    """, (group_id,))
+    actions = {r['action']: int(r['c']) for r in cur.fetchall()}
+    cur.close()
+
+    return {
+        "penalties": {"imposed": round(imposed), "collected": round(paid), "forgiven": round(forgiven),
+                      "forgiven_pct": round(forgiven / imposed * 100, 1) if imposed else 0,
+                      "outstanding": round(max(imposed - paid - forgiven, 0))},
+        "loans": {"borrowers": len(ranked), "owed_total": round(total_owed),
+                  "top3": [{"name": v["name"], "owed": round(v["owed"])} for v in top3],
+                  "top3_share_pct": round(top3_share, 1)},
+        "actions_30d": {
+            "deletions": sum(actions.get(k, 0) for k in ("delete_rejesho", "edit_contribution:DELETE",
+                             "edit_loan:DELETE", "edit_penalty:DELETE")),
+            "edits": sum(actions.get(k, 0) for k in ("edit_contribution:PUT", "edit_loan:PUT", "edit_penalty:PUT")),
+            "forgiveness": sum(actions.get(k, 0) for k in ("forgive_loan", "forgive_penalty_amount")),
+            "total": sum(actions.values()),
+        },
+    }
+
+
+# ---------------------------------------------------------------- routes
+def _check_row(r):
+    return {
+        "id": r['id'], "as_of": r['as_of'],
+        "actual": _n(r['actual_balance']), "expected": _n(r['expected_balance']),
+        "difference": _n(r['difference']), "status": r['status'],
+        "tolerance": _n(r['tolerance']),
+        "components": json.loads(r['components']) if r.get('components') else None,
+        "statement_ref": r['statement_ref'], "note": r['note'],
+        "entered_by": r['entered_by_name'], "entered_role": r['entered_by_role'],
+        "created_at": r['created_at'],
+    }
+
+
+@app.route('/balance-check')
+@require_any_member
+def balance_check_page():
+    return render_template('balance_check.html',
+                           can_record=session.get('role') in ('admin', 'treasurer'))
+
+
+@app.route('/api/reconciliation', methods=['GET'])
+@require_any_member
+def reconciliation_summary():
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+    _acc_ensure(db)
+
+    settings = get_group_settings(db, group_id)
+    try:
+        tolerance = float(settings.get("reconcile_tolerance", 1000))
+    except (TypeError, ValueError):
+        tolerance = 1000.0
+    try:
+        every_days = int(float(settings.get("reconcile_every_days", 30)))
+    except (TypeError, ValueError):
+        every_days = 30
+
+    today = _acc_today()
+    now = compute_expected_balance(db, group_id, today.isoformat())
+
+    cur = get_cursor(db)
+    cur.execute("SELECT * FROM balance_checks WHERE group_id = %s ORDER BY id DESC LIMIT 12", (group_id,))
+    history = [_check_row(r) for r in cur.fetchall()]
+    cur.execute("""SELECT id, actor_name, actor_role, action, summary, created_at
+                   FROM audit_log WHERE group_id = %s ORDER BY id DESC LIMIT 50""", (group_id,))
+    actions = [dict(r) for r in cur.fetchall()]
+    cur.close()
+
+    latest = history[0] if history else None
+    days_since = None
+    if latest:
+        days_since = (today - datetime.strptime(latest["as_of"], "%Y-%m-%d").date()).days
+
+    return jsonify({
+        "today": today.isoformat(),
+        "tolerance": tolerance,
+        "every_days": every_days,
+        "now": now,
+        "latest": latest,
+        "history": history,
+        "days_since_last": days_since,
+        "check_overdue": latest is None or days_since > every_days,
+        "integrity": integrity_checks(db, group_id),
+        "fairness": fairness_summary(db, group_id),
+        "actions": actions,
+        "can_record": session.get('role') in ('admin', 'treasurer'),
+    })
+
+
+@app.route('/api/reconciliation/check', methods=['POST'])
+@require_treasurer_or_above
+def reconciliation_record():
+    """
+    Record the real M-Koba balance. The app computes what the balance SHOULD
+    be on that date and stores both, plus the difference. Entries are
+    permanent: there is no edit or delete.
+    Body: { "actual_balance": 8450000, "as_of": "2026-10-14" (optional),
+            "statement_ref": "optional", "note": "optional" }
+    """
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+    _acc_ensure(db)
+
+    data = request.get_json(silent=True) or {}
+    try:
+        actual = float(data.get("actual_balance"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Enter the M-Koba balance as a number"}), 400
+    if actual < 0 or actual > 1e12:
+        return jsonify({"error": "That balance does not look right"}), 400
+
+    today = _acc_today()
+    as_of = str(data.get("as_of") or today.isoformat()).strip()
+    try:
+        as_of_date = datetime.strptime(as_of, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Date must look like 2026-10-14"}), 400
+    if as_of_date > today:
+        return jsonify({"error": "The date cannot be in the future"}), 400
+
+    note = str(data.get("note") or "").strip()[:300]
+    ref  = str(data.get("statement_ref") or "").strip()[:60]
+
+    settings = get_group_settings(db, group_id)
+    try:
+        tolerance = float(settings.get("reconcile_tolerance", 1000))
+    except (TypeError, ValueError):
+        tolerance = 1000.0
+
+    comp = compute_expected_balance(db, group_id, as_of_date.isoformat())
+    expected   = comp["expected_balance"]
+    difference = round(actual - expected)
+    status     = _acc_status(difference, tolerance)
+
+    cur = get_cursor(db)
+    cur.execute("""
+        INSERT INTO balance_checks
+            (group_id, as_of, actual_balance, expected_balance, difference, tolerance, status,
+             components, statement_ref, note, entered_by, entered_by_name, entered_by_role)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+    """, (group_id, as_of_date.isoformat(), actual, expected, difference, tolerance, status,
+          json.dumps(comp), ref or None, note or None,
+          session.get("member_id"), session.get("member_name"), session.get("role")))
+    row = _check_row(cur.fetchone())
+    db.commit()
+    cur.close()
+    return jsonify({"status": "success", "check": row})
+
+
+@app.route('/api/audit-log', methods=['GET'])
+@require_any_member
+def audit_log_list():
+    db = get_db()
+    group_id = get_current_group_id()
+    if not group_id:
+        return jsonify({"error": "No group selected"}), 400
+    _acc_ensure(db)
+    cur = get_cursor(db)
+    cur.execute("""SELECT id, actor_name, actor_role, action, summary, created_at
+                   FROM audit_log WHERE group_id = %s ORDER BY id DESC LIMIT 200""", (group_id,))
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    return jsonify({"log": rows})
+
+
+# ---------------------------------------------------------------- automatic audit trail
+# Leader actions that change or hide money records. The key is the Flask
+# endpoint name (the function name of the route), optionally with ":METHOD".
+_AUDITED = {
+    'delete_rejesho', 'edit_contribution', 'edit_loan', 'forgive_loan', 'unforgive_loan',
+    'edit_penalty', 'freeze_penalty', 'forgive_penalty_amount', 'add_penalty',
+    'record_penalty_payment', 'record_jamii_deduction', 'add_loan',
+    'set_member_role', 'toggle_member_active',
+}
+
+
+def _tzs(value):
+    return f"{_n(value):,.0f} TZS"
+
+
+def _audit_describe(cur, ep, method, args, group_id, body):
+    """Return a plain-language sentence about what is about to happen, or None."""
+    if ep == 'delete_rejesho':
+        cur.execute("""SELECT r.amount, r.date, l.id AS loan_id, m.name
+                       FROM rejesho r JOIN loans l ON l.id = r.loan_id JOIN members m ON m.id = l.member_id
+                       WHERE r.id = %s AND r.group_id = %s""", (args.get('rejesho_id'), group_id))
+        r = cur.fetchone()
+        return (f"Deleted a rejesho payment of {_tzs(r['amount'])} dated {r['date']} "
+                f"({r['name']}, loan #{r['loan_id']})") if r else None
+
+    if ep == 'edit_contribution':
+        cur.execute("""SELECT c.type, c.amount, c.date, c.transaction_date, m.name
+                       FROM contributions c JOIN members m ON m.id = c.member_id
+                       WHERE c.id = %s AND c.group_id = %s""", (args.get('contribution_id'), group_id))
+        r = cur.fetchone()
+        if not r:
+            return None
+        if method == 'DELETE':
+            return f"Deleted a {r['type']} contribution of {_tzs(r['amount'])} dated {r['transaction_date'] or r['date']} ({r['name']})"
+        return (f"Edited a {r['type']} contribution of {r['name']}: was {_tzs(r['amount'])} dated "
+                f"{r['transaction_date'] or r['date']}, now {_tzs(body.get('amount'))} dated {body.get('transaction_date') or body.get('date')}")
+
+    if ep in ('edit_loan', 'forgive_loan', 'unforgive_loan'):
+        cur.execute("""SELECT l.principal, l.status, l.due_date, m.name FROM loans l
+                       JOIN members m ON m.id = l.member_id WHERE l.id = %s AND l.group_id = %s""",
+                    (args.get('loan_id'), group_id))
+        r = cur.fetchone()
+        if not r:
+            return None
+        lid = args.get('loan_id')
+        if ep == 'forgive_loan':
+            return f"Forgave the loan of {r['name']} (loan #{lid}, {_tzs(r['principal'])}). Reason: {str(body.get('reason') or '')[:120]}"
+        if ep == 'unforgive_loan':
+            return f"Reversed the forgiveness of {r['name']}'s loan #{lid}"
+        if method == 'DELETE':
+            return f"Deleted the loan of {r['name']} (loan #{lid}, {_tzs(r['principal'])})"
+        return (f"Changed loan #{lid} of {r['name']}: status {r['status']} -> {body.get('status')}, "
+                f"due date {r['due_date']} -> {body.get('due_date')}")
+
+    if ep in ('edit_penalty', 'freeze_penalty', 'forgive_penalty_amount', 'record_penalty_payment'):
+        cur.execute("""SELECT p.type, p.amount, p.description, m.name FROM penalties p
+                       JOIN members m ON m.id = p.member_id WHERE p.id = %s AND p.group_id = %s""",
+                    (args.get('penalty_id'), group_id))
+        r = cur.fetchone()
+        if not r:
+            return None
+        pid = args.get('penalty_id')
+        if ep == 'forgive_penalty_amount':
+            return (f"Forgave {_tzs(body.get('forgiven_amount'))} of penalty #{pid} ({r['name']}). "
+                    f"Reason: {str(body.get('reason') or '')[:120]}")
+        if ep == 'freeze_penalty':
+            return (f"{'Froze' if body.get('freeze', True) else 'Unfroze'} penalty #{pid} ({r['name']}). "
+                    f"Reason: {str(body.get('reason') or '')[:120]}")
+        if ep == 'record_penalty_payment':
+            return f"Received a penalty payment of {_tzs(body.get('amount'))} for penalty #{pid} ({r['name']})"
+        if method == 'DELETE':
+            return f"Deleted penalty #{pid} of {r['name']}: {_tzs(r['amount'])}"
+        return f"Changed penalty #{pid} of {r['name']}: {_tzs(r['amount'])} -> {_tzs(body.get('amount'))}"
+
+    if ep in ('add_penalty', 'add_loan', 'set_member_role', 'toggle_member_active'):
+        cur.execute("SELECT name FROM members WHERE id = %s AND group_id = %s", (body.get('member_id'), group_id))
+        r = cur.fetchone()
+        if not r:
+            return None
+        if ep == 'add_penalty':
+            return f"Added a manual penalty of {_tzs(body.get('amount'))} to {r['name']}: {str(body.get('description') or '')[:100]}"
+        if ep == 'add_loan':
+            return f"Issued a loan of {_tzs(body.get('principal'))} to {r['name']}"
+        if ep == 'set_member_role':
+            return f"Changed the role of {r['name']} to {body.get('role')}"
+        return f"{'Activated' if body.get('is_active') else 'Deactivated'} the member {r['name']}"
+
+    if ep == 'record_jamii_deduction':
+        return f"Recorded an expense (Jamii deduction) of {_tzs(body.get('amount'))}"
+
+    return None
+
+
+@app.before_request
+def _audit_capture():
+    """Before a leader action runs, note what it is about to change."""
+    try:
+        if request.method not in ("POST", "PUT", "DELETE"):
+            return
+        ep = request.endpoint
+        if ep not in _AUDITED:
+            return
+        group_id = session.get("group_id")
+        if not group_id:
+            return
+        db = get_db()
+        _acc_ensure(db)
+        cur = get_cursor(db)
+        summary = _audit_describe(cur, ep, request.method, request.view_args or {}, group_id,
+                                  request.get_json(silent=True) or {})
+        cur.close()
+        if summary:
+            key = f"{ep}:{request.method}" if ep in ('edit_contribution', 'edit_loan', 'edit_penalty') else ep
+            g._audit = {"group_id": group_id, "action": key, "summary": summary[:500]}
+    except Exception as e:
+        print(f"audit capture error: {e}")
+        try:
+            get_db().rollback()
+        except Exception:
+            pass
+
+
+@app.after_request
+def _audit_write(response):
+    """If the action succeeded, write it to the permanent log."""
+    try:
+        entry = g.pop("_audit", None)
+        if entry and response.status_code < 400:
+            db = get_db()
+            cur = get_cursor(db)
+            cur.execute("""
+                INSERT INTO audit_log (group_id, actor_id, actor_name, actor_role, action, summary)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (entry["group_id"], session.get("member_id"), session.get("member_name"),
+                  session.get("role"), entry["action"], entry["summary"]))
+            db.commit()
+            cur.close()
+    except Exception as e:
+        print(f"audit write error: {e}")
+        try:
+            get_db().rollback()
+        except Exception:
+            pass
+    return response
 
 if __name__ == "__main__":
     from models import init_db

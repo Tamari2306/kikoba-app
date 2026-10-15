@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="container-fluid py-4">
+
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+        <h2 class="text-success mb-0">🔍 Group Money Check</h2>
+        <button class="btn btn-outline-secondary d-print-none" onclick="window.print()">
+            <i class="bi bi-printer"></i> Print
+        </button>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+        <div class="card-body small">
+            <strong>What is this page?</strong>
+            Every contribution, loan, repayment and expense in the app is added up to work out how much money
+            the group's M-Koba account <em>should</em> hold. Leaders then type in the <em>real</em> balance from M-Koba.
+            If the two numbers differ, money is missing or was never recorded.
+            Every comparison is kept permanently and nobody, including the leaders, can change or delete it.
+            Every deletion, edit, forgiveness and loan by a leader is also written down below.
+        </div>
+    </div>
+
+    <div id="status" class="alert d-none"></div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-lg-4">
+            <div class="card shadow-sm h-100"><div class="card-body">
+                <h6 class="fw-bold">Money in</h6>
+                <table class="table table-sm mb-0"><tbody id="tbl-in"></tbody></table>
+            </div></div>
+        </div>
+        <div class="col-lg-4">
+            <div class="card shadow-sm h-100"><div class="card-body">
+                <h6 class="fw-bold">Money out</h6>
+                <table class="table table-sm mb-0"><tbody id="tbl-out"></tbody></table>
+            </div></div>
+        </div>
+        <div class="col-lg-4">
+            <div class="card shadow-sm h-100 border-success"><div class="card-body">
+                <h6 class="fw-bold">The records say the account should hold</h6>
+                <h3 id="expected" class="fw-bold text-success">...</h3>
+                <div class="small text-muted">as of today. Compare with what M-Koba shows right now.</div>
+            </div></div>
+        </div>
+    </div>
+
+    {% if can_record %}
+    <div class="card shadow-sm mb-4 d-print-none">
+        <div class="card-body">
+            <h6 class="fw-bold">Record the M-Koba balance</h6>
+            <form id="check-form" class="row g-2 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label small">M-Koba balance (TZS)</label>
+                    <input type="number" id="f-actual" class="form-control" min="0" step="1" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">As of</label>
+                    <input type="date" id="f-asof" class="form-control">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Reference</label>
+                    <input type="text" id="f-ref" class="form-control" maxlength="60">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Note</label>
+                    <input type="text" id="f-note" class="form-control" maxlength="300">
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-success w-100" type="submit">Save permanently</button>
+                </div>
+            </form>
+            <div id="f-error" class="text-danger small mt-2"></div>
+            <div class="small text-muted mt-1">Saved records are permanent and visible to every member.</div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <h6 class="fw-bold mb-3">History of M-Koba comparisons</h6>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>As of</th><th class="text-end">Records say</th><th class="text-end">M-Koba showed</th>
+                            <th class="text-end">Difference</th><th>Result</th><th>Entered by</th><th>Reference / note</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-lg-6">
+            <div class="card shadow-sm h-100"><div class="card-body">
+                <h6 class="fw-bold mb-3">Do the books agree with themselves?</h6>
+                <ul id="integrity" class="list-unstyled small mb-0"></ul>
+            </div></div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card shadow-sm h-100"><div class="card-body">
+                <h6 class="fw-bold mb-3">Fairness at a glance</h6>
+                <div id="fairness" class="small"></div>
+            </div></div>
+        </div>
+    </div>
+
+    <div class="card shadow-sm" id="actions">
+        <div class="card-body">
+            <h6 class="fw-bold mb-1">Everything leaders changed</h6>
+            <div class="small text-muted mb-3">
+                Written automatically. Leaders cannot edit or remove these lines. Showing the latest 200.
+            </div>
+            <div class="table-responsive" style="max-height: 520px; overflow-y: auto;">
+                <table class="table table-sm align-middle">
+                    <thead class="table-light">
+                        <tr><th>When</th><th>Who</th><th>What happened</th></tr>
+                    </thead>
+                    <tbody id="action-log"><tr><td colspan="3" class="text-muted">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+
+const CAN_RECORD = {{ 'true' if can_record else 'false' }};
+
+const tzs = v => Number(v || 0).toLocaleString() + " TZS";
+
+function esc(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+const row = (label, value, bold) =>
+    `<tr><td>${esc(label)}</td><td class="text-end ${bold ? "fw-bold" : ""}">${esc(value)}</td></tr>`;
+
+const badge = status => ({
+    matched: '<span class="badge bg-success">Matched</span>',
+    short:   '<span class="badge bg-danger">Money missing</span>',
+    over:    '<span class="badge bg-warning text-dark">Extra money</span>'
+}[status] || esc(status));
+
+
+async function load() {
+    const res = await fetch("/api/reconciliation");
+    const d = await res.json();
+    if (!res.ok) {
+        document.getElementById("status").className = "alert alert-danger";
+        document.getElementById("status").textContent = d.error || "Could not load.";
+        return;
+    }
+    const now = d.now, latest = d.latest;
+
+    // ---- headline
+    const box = document.getElementById("status");
+    if (!latest) {
+        box.className = "alert alert-warning";
+        box.innerHTML = "<strong>No M-Koba balance has been recorded yet.</strong> Until leaders record one, nobody can confirm the books match the account.";
+    } else if (latest.status === "matched") {
+        box.className = "alert alert-success";
+        box.innerHTML = `<strong>✅ Matched.</strong> On ${esc(latest.as_of)} the M-Koba balance (${tzs(latest.actual)}) agreed with the records (${tzs(latest.expected)}).`;
+    } else if (latest.status === "short") {
+        box.className = "alert alert-danger";
+        box.innerHTML = `<strong>⚠️ ${tzs(Math.abs(latest.difference))} is MISSING.</strong> On ${esc(latest.as_of)} M-Koba held ${tzs(latest.actual)} but the records say it should hold ${tzs(latest.expected)}.`;
+    } else {
+        box.className = "alert alert-warning";
+        box.innerHTML = `<strong>⚠️ ${tzs(latest.difference)} EXTRA.</strong> On ${esc(latest.as_of)} M-Koba held ${tzs(latest.actual)} but the records only explain ${tzs(latest.expected)}. Some deposits may not have been entered.`;
+    }
+    if (d.check_overdue && latest) {
+        box.innerHTML += `<div class="small mt-1">A new check is due: the last one was ${d.days_since_last} days ago.</div>`;
+    }
+
+    // ---- money in / out
+    const i = now.money_in, o = now.money_out;
+    document.getElementById("tbl-in").innerHTML =
+        row("Hisa Anzia", tzs(i.hisa_anzia)) + row("Hisa", tzs(i.hisa)) + row("Jamii", tzs(i.jamii)) +
+        row("Penalty payments", tzs(i.penalty_payments)) + (i.other ? row("Other", tzs(i.other)) : "") +
+        row("Rejesho (loan repayments)", tzs(i.rejesho)) + row("Total in", tzs(i.total), true);
+    document.getElementById("tbl-out").innerHTML =
+        row(`Loans paid out (${o.loans_count})`, tzs(o.loans_paid_out)) +
+        row("Expenses", tzs(o.expenses)) + row("Total out", tzs(o.total), true);
+    document.getElementById("expected").textContent = tzs(now.expected_balance);
+
+    // ---- history
+    document.getElementById("history").innerHTML = d.history.length ? d.history.map(h => `
+        <tr>
+            <td>${esc(h.as_of)}</td>
+            <td class="text-end">${tzs(h.expected)}</td>
+            <td class="text-end">${tzs(h.actual)}</td>
+            <td class="text-end fw-bold">${tzs(h.difference)}</td>
+            <td>${badge(h.status)}</td>
+            <td>${esc(h.entered_by || "")} <span class="text-muted small">${esc(h.entered_role || "")}</span><br>
+                <span class="text-muted small">${esc(new Date(h.created_at).toLocaleString())}</span></td>
+            <td class="small">${esc(h.statement_ref || "")}${h.statement_ref && h.note ? " - " : ""}${esc(h.note || "")}</td>
+        </tr>`).join("")
+        : `<tr><td colspan="7" class="text-muted">Nothing recorded yet.</td></tr>`;
+
+    // ---- integrity
+    const icon = {ok: "✅", warn: "⚠️", bad: "❌"};
+    document.getElementById("integrity").innerHTML = d.integrity.map(c => `
+        <li class="mb-2">${icon[c.level] || ""} <strong>${esc(c.label)}</strong>
+            <div class="text-muted ms-4">${esc(c.detail)}</div></li>`).join("");
+
+    // ---- fairness
+    const f = d.fairness;
+    document.getElementById("fairness").innerHTML = `
+        <p class="mb-2"><strong>Penalties</strong><br>
+           Charged ${tzs(f.penalties.imposed)}, collected ${tzs(f.penalties.collected)},
+           forgiven ${tzs(f.penalties.forgiven)} (${f.penalties.forgiven_pct}% of all charged),
+           still owed ${tzs(f.penalties.outstanding)}.</p>
+        <p class="mb-2"><strong>Who holds the loans</strong><br>
+           ${f.loans.borrowers} members owe ${tzs(f.loans.owed_total)}.
+           ${f.loans.top3.length ? "Biggest: " + f.loans.top3.map(x => `${esc(x.name)} ${tzs(x.owed)}`).join(", ") +
+              ` (together ${f.loans.top3_share_pct}%).` : ""}</p>
+        <p class="mb-0"><strong>Leader actions in the last 30 days</strong><br>
+           ${f.actions_30d.total} in total: ${f.actions_30d.deletions} deletions,
+           ${f.actions_30d.edits} edits, ${f.actions_30d.forgiveness} forgiveness.</p>`;
+
+    // ---- full action log
+    const log = await (await fetch("/api/audit-log")).json();
+    document.getElementById("action-log").innerHTML = (log.log || []).length ? log.log.map(a => `
+        <tr>
+            <td class="small text-nowrap">${esc(new Date(a.created_at).toLocaleString())}</td>
+            <td class="text-nowrap">${esc(a.actor_name || "")} <span class="text-muted small">${esc(a.actor_role || "")}</span></td>
+            <td>${esc(a.summary)}</td>
+        </tr>`).join("")
+        : `<tr><td colspan="3" class="text-muted">No leader actions recorded yet.</td></tr>`;
+}
+
+
+if (CAN_RECORD) {
+    document.getElementById("f-asof").value = new Date().toISOString().slice(0, 10);
+    document.getElementById("check-form").addEventListener("submit", async e => {
+        e.preventDefault();
+        const err = document.getElementById("f-error");
+        err.textContent = "";
+        if (!confirm("Save this balance permanently? It cannot be changed or deleted.")) return;
+        const res = await fetch("/api/reconciliation/check", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                actual_balance: document.getElementById("f-actual").value,
+                as_of: document.getElementById("f-asof").value,
+                statement_ref: document.getElementById("f-ref").value,
+                note: document.getElementById("f-note").value
+            })
+        });
+        const data = await res.json();
+        if (!res.ok) { err.textContent = data.error || "Could not save."; return; }
+        e.target.reset();
+        document.getElementById("f-asof").value = new Date().toISOString().slice(0, 10);
+        load();
+    });
+}
+
+load();
+
+</script>
+
+{% endblock %}

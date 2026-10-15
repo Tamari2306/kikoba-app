@@ -216,6 +216,108 @@
   </div>
 </div>
 
+<div class="card shadow-sm mb-4" id="money-check-card">
+    <div class="card-body">
+ 
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+            <div>
+                <h5 class="fw-bold mb-1">🔍 Money Check
+                    <small class="text-muted fw-normal">- does the app match the real M-Koba account?</small>
+                </h5>
+                <div id="mc-subtitle" class="small text-muted">Loading...</div>
+            </div>
+            <div class="d-flex gap-2">
+                <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#checkModal">
+                    <i class="bi bi-clipboard-check"></i> Record M-Koba balance
+                </button>
+                <a href="/balance-check" class="btn btn-outline-secondary">Full report</a>
+            </div>
+        </div>
+ 
+        <div id="mc-status" class="alert mb-3 d-none"></div>
+ 
+        <div class="row g-3">
+            <div class="col-md-4">
+                <div class="fw-bold small text-uppercase text-muted mb-1">Money in</div>
+                <table class="table table-sm mb-0"><tbody id="mc-in"></tbody></table>
+            </div>
+            <div class="col-md-4">
+                <div class="fw-bold small text-uppercase text-muted mb-1">Money out</div>
+                <table class="table table-sm mb-0"><tbody id="mc-out"></tbody></table>
+            </div>
+            <div class="col-md-4">
+                <div class="fw-bold small text-uppercase text-muted mb-1">Compare</div>
+                <table class="table table-sm mb-0"><tbody id="mc-compare"></tbody></table>
+            </div>
+        </div>
+ 
+        <hr>
+ 
+        <div class="row g-3">
+            <div class="col-md-6">
+                <div class="fw-bold small text-uppercase text-muted mb-1">Do the books agree with themselves?</div>
+                <ul id="mc-integrity" class="list-unstyled small mb-0"></ul>
+            </div>
+            <div class="col-md-6">
+                <div class="fw-bold small text-uppercase text-muted mb-1">
+                    Latest leader actions
+                    <a href="/balance-check#actions" class="fw-normal ms-1">see all</a>
+                </div>
+                <ul id="mc-actions" class="list-unstyled small mb-0"></ul>
+            </div>
+        </div>
+ 
+        <hr>
+ 
+        <div class="fw-bold small text-uppercase text-muted mb-2">Fairness at a glance</div>
+        <div class="row g-3" id="mc-fairness"></div>
+ 
+    </div>
+</div>
+ 
+<!-- Record balance modal -->
+<div class="modal fade" id="checkModal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Record the M-Koba balance</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-info small">
+            Open M-Koba, read the balance, and type it exactly as it shows.
+            <strong>This record is permanent and every member can see it.</strong>
+            If you make a mistake, record a new one with a note.
+        </div>
+        <div class="small text-muted mb-3">
+            The records say the account should hold:
+            <strong id="mc-modal-expected">...</strong>
+        </div>
+        <form id="checkForm">
+            <div class="mb-3">
+                <label class="form-label">M-Koba balance (TZS)</label>
+                <input type="number" class="form-control" id="mc-actual" min="0" step="1" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Balance as of (date)</label>
+                <input type="date" class="form-control" id="mc-asof">
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Statement / reference (optional)</label>
+                <input type="text" class="form-control" id="mc-ref" maxlength="60">
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Note (optional)</label>
+                <input type="text" class="form-control" id="mc-note" maxlength="300">
+            </div>
+            <div id="mc-form-error" class="text-danger small mb-2"></div>
+            <button type="submit" class="btn btn-success w-100">Save permanently</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Summary Cards -->
 <div class="row g-3 mb-4">
     <div class="col-lg-4 col-md-6">
@@ -629,6 +731,139 @@ function initBackupButton() {
     });
 }
 
+/* ================= MONEY CHECK ================= */
+function mcEsc(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+ 
+function mcRow(label, value, bold) {
+    return `<tr><td>${mcEsc(label)}</td><td class="text-end ${bold ? "fw-bold" : ""}">${mcEsc(value)}</td></tr>`;
+}
+ 
+async function loadMoneyCheck() {
+    try {
+        const res = await fetch("/api/reconciliation");
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || "failed");
+ 
+        const now = d.now, latest = d.latest;
+        const tzs = formatTZS;
+ 
+        // ---- headline
+        const box = document.getElementById("mc-status");
+        box.classList.remove("d-none", "alert-success", "alert-danger", "alert-warning", "alert-secondary");
+        if (!latest) {
+            box.classList.add("alert-warning");
+            box.innerHTML = "<strong>No M-Koba balance has been recorded yet.</strong> Record one so every member can see that the books match the account.";
+        } else if (latest.status === "matched") {
+            box.classList.add("alert-success");
+            box.innerHTML = `<strong>✅ Matched.</strong> On ${mcEsc(latest.as_of)} the M-Koba balance (${tzs(latest.actual)}) agreed with the records (${tzs(latest.expected)}).`;
+        } else if (latest.status === "short") {
+            box.classList.add("alert-danger");
+            box.innerHTML = `<strong>⚠️ ${tzs(Math.abs(latest.difference))} is MISSING.</strong> On ${mcEsc(latest.as_of)} M-Koba held ${tzs(latest.actual)} but the records say it should hold ${tzs(latest.expected)}. Find out where this money went.`;
+        } else {
+            box.classList.add("alert-warning");
+            box.innerHTML = `<strong>⚠️ ${tzs(latest.difference)} EXTRA.</strong> On ${mcEsc(latest.as_of)} M-Koba held ${tzs(latest.actual)} but the records only explain ${tzs(latest.expected)}. Some deposits may not have been entered.`;
+        }
+        if (d.check_overdue && latest) {
+            box.innerHTML += `<div class="small mt-1">A new check is due: the last one was ${d.days_since_last} days ago (every ${d.every_days} days is expected).</div>`;
+        }
+ 
+        document.getElementById("mc-subtitle").textContent =
+            latest ? `Last checked ${latest.as_of} by ${latest.entered_by || "a leader"}` : "Never checked";
+ 
+        // ---- money in / out / compare
+        const i = now.money_in, o = now.money_out;
+        document.getElementById("mc-in").innerHTML =
+            mcRow("Hisa Anzia", tzs(i.hisa_anzia)) + mcRow("Hisa", tzs(i.hisa)) + mcRow("Jamii", tzs(i.jamii)) +
+            mcRow("Penalty payments", tzs(i.penalty_payments)) + (i.other ? mcRow("Other", tzs(i.other)) : "") +
+            mcRow("Rejesho (loan repayments)", tzs(i.rejesho)) + mcRow("Total in", tzs(i.total), true);
+        document.getElementById("mc-out").innerHTML =
+            mcRow(`Loans paid out (${o.loans_count})`, tzs(o.loans_paid_out)) +
+            mcRow("Expenses", tzs(o.expenses)) + mcRow("Total out", tzs(o.total), true);
+        document.getElementById("mc-compare").innerHTML =
+            mcRow("Records say it should be", tzs(now.expected_balance), true) +
+            mcRow("Last M-Koba balance", latest ? tzs(latest.actual) : "-") +
+            mcRow("Last difference", latest ? tzs(latest.difference) : "-", true);
+ 
+        document.getElementById("mc-modal-expected").textContent = tzs(now.expected_balance);
+ 
+        // ---- integrity
+        const icon = {ok: "✅", warn: "⚠️", bad: "❌"};
+        document.getElementById("mc-integrity").innerHTML = d.integrity.map(c =>
+            `<li class="mb-1">${icon[c.level] || ""} <strong>${mcEsc(c.label)}</strong>
+             ${c.level === "ok" ? "" : `<div class="text-muted ms-4">${mcEsc(c.detail)}</div>`}</li>`).join("");
+ 
+        // ---- latest actions
+        const acts = (d.actions || []).slice(0, 5);
+        document.getElementById("mc-actions").innerHTML = acts.length ? acts.map(a =>
+            `<li class="mb-1"><span class="text-muted">${mcEsc(new Date(a.created_at).toLocaleDateString())}</span>
+             <strong>${mcEsc(a.actor_name || "")}</strong>: ${mcEsc(a.summary)}</li>`).join("")
+            : `<li class="text-muted">No leader actions recorded yet.</li>`;
+ 
+        // ---- fairness
+        const f = d.fairness;
+        const top = f.loans.top3.map(x => x.name).join(", ");
+        document.getElementById("mc-fairness").innerHTML = `
+            <div class="col-md-4"><div class="border rounded p-2 h-100 small">
+                <strong>Penalties</strong><br>
+                Charged ${tzs(f.penalties.imposed)}<br>Collected ${tzs(f.penalties.collected)}<br>
+                Forgiven ${tzs(f.penalties.forgiven)} (${f.penalties.forgiven_pct}%)
+            </div></div>
+            <div class="col-md-4"><div class="border rounded p-2 h-100 small">
+                <strong>Who holds the loans</strong><br>
+                ${f.loans.borrowers} borrowers owe ${tzs(f.loans.owed_total)}<br>
+                ${f.loans.top3.length ? `Top ${f.loans.top3.length} (${mcEsc(top)}) hold ${f.loans.top3_share_pct}%` : "No loans outstanding"}
+            </div></div>
+            <div class="col-md-4"><div class="border rounded p-2 h-100 small">
+                <strong>Leader actions, last 30 days</strong><br>
+                Deletions: ${f.actions_30d.deletions}<br>Edits: ${f.actions_30d.edits}<br>
+                Forgiveness: ${f.actions_30d.forgiveness}
+            </div></div>`;
+    } catch (e) {
+        console.error("Money check failed", e);
+        document.getElementById("mc-subtitle").textContent = "Could not load the money check.";
+    }
+}
+ 
+function initMoneyCheckForm() {
+    const form = document.getElementById("checkForm");
+    if (!form) return;
+    document.getElementById("mc-asof").value = new Date().toISOString().slice(0, 10);
+ 
+    form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const err = document.getElementById("mc-form-error");
+        err.textContent = "";
+        const body = {
+            actual_balance: document.getElementById("mc-actual").value,
+            as_of: document.getElementById("mc-asof").value,
+            statement_ref: document.getElementById("mc-ref").value,
+            note: document.getElementById("mc-note").value
+        };
+        if (!confirm("Save this balance permanently? It cannot be changed or deleted.")) return;
+        try {
+            const res = await fetch("/api/reconciliation/check", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if (!res.ok) { err.textContent = data.error || "Could not save."; return; }
+            form.reset();
+            document.getElementById("mc-asof").value = new Date().toISOString().slice(0, 10);
+            const modal = bootstrap.Modal.getInstance(document.getElementById("checkModal"));
+            if (modal) modal.hide();
+            loadMoneyCheck();
+        } catch (ex) {
+            err.textContent = "Could not save. Please try again.";
+        }
+    });
+}
+initMoneyCheckForm();
+
 /* ================= BOOT ================= */
 document.addEventListener("DOMContentLoaded", () => {
     initSettingsForm();
@@ -636,6 +871,7 @@ document.addEventListener("DOMContentLoaded", () => {
     initBackupButton();
     loadConstitutionStatus();
     loadDashboard();
+    loadMoneyCheck();
 });
 </script>
 

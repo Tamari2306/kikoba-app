@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="container-fluid py-4">
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2 class="text-success mb-0">💬 Send SMS to Members</h2>
+        <span id="status-badge" class="badge bg-secondary">Checking...</span>
+    </div>
+
+    <div id="not-configured" class="alert alert-danger d-none">
+        <strong>SMS is not set up on the server yet.</strong>
+        Add <code>BEEM_API_KEY</code> and <code>BEEM_SECRET_KEY</code> in Render, then redeploy.
+        You can still write and preview a message, but sending is blocked.
+    </div>
+
+    <div class="row g-3">
+
+        <!-- Compose -->
+        <div class="col-lg-7">
+            <div class="card shadow-sm p-3">
+
+                <h6 class="fw-bold mb-3">1. Write your message</h6>
+
+                <textarea id="message" class="form-control" rows="5" maxlength="459"
+                          placeholder="Habari {name}, mkutano wa {group} utakuwa Jumamosi saa 4 asubuhi. Karibu."></textarea>
+
+                <div class="d-flex justify-content-between mt-2 small text-muted">
+                    <span>Use <code>{name}</code> for the member's first name and <code>{group}</code> for the group name.</span>
+                    <span id="counter">0 characters · 0 SMS each</span>
+                </div>
+                <div class="small text-muted mt-1">
+                    Plain letters and numbers only: emojis and special symbols are removed automatically.
+                </div>
+
+                <hr>
+
+                <h6 class="fw-bold mb-3">2. Who gets it?</h6>
+
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="mode" id="mode-all" value="all" checked>
+                    <label class="form-check-label" for="mode-all">All active members</label>
+                </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="mode" id="mode-pick" value="pick">
+                    <label class="form-check-label" for="mode-pick">Only the members I choose</label>
+                </div>
+
+                <div id="pick-box" class="border rounded p-2 d-none" style="max-height: 240px; overflow-y: auto;">
+                    <div class="form-check border-bottom pb-1 mb-1">
+                        <input class="form-check-input" type="checkbox" id="pick-everyone">
+                        <label class="form-check-label fw-bold" for="pick-everyone">Select everyone</label>
+                    </div>
+                    <div id="member-list"></div>
+                </div>
+
+                <hr>
+
+                <h6 class="fw-bold mb-3">3. Check, then send</h6>
+
+                <div class="d-flex gap-2">
+                    <button id="btn-preview" class="btn btn-outline-success">Preview (sends nothing)</button>
+                    <button id="btn-send" class="btn btn-success" disabled>Send now</button>
+                </div>
+
+                <div id="preview-box" class="alert alert-info mt-3 d-none"></div>
+                <div id="result-box" class="alert mt-3 d-none"></div>
+
+            </div>
+        </div>
+
+        <!-- Log -->
+        <div class="col-lg-5">
+            <div class="card shadow-sm p-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="fw-bold mb-0">Recent messages</h6>
+                    <button id="btn-refresh" class="btn btn-sm btn-outline-secondary">Refresh</button>
+                </div>
+                <div class="table-responsive" style="max-height: 560px; overflow-y: auto;">
+                    <table class="table table-sm align-middle">
+                        <thead class="table-light">
+                            <tr><th>When</th><th>To</th><th>Type</th><th>Status</th></tr>
+                        </thead>
+                        <tbody id="log-body">
+                            <tr><td colspan="4" class="text-center text-muted">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+
+<script>
+
+const $ = id => document.getElementById(id);
+
+let previewedKey = null;   // what was previewed; Send is only enabled for exactly that
+
+
+function esc(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function segmentsFor(n) {
+    return n === 0 ? 0 : (n <= 160 ? 1 : Math.ceil(n / 153));
+}
+
+function selectedIds() {
+    return [...document.querySelectorAll("#member-list input:checked")].map(x => Number(x.value));
+}
+
+function requestBody(extra) {
+    const all = $("mode-all").checked;
+    return Object.assign({
+        message: $("message").value,
+        all: all,
+        member_ids: all ? [] : selectedIds()
+    }, extra);
+}
+
+function currentKey() {
+    return JSON.stringify([$("message").value, $("mode-all").checked, selectedIds()]);
+}
+
+function invalidatePreview() {
+    previewedKey = null;
+    $("btn-send").disabled = true;
+}
+
+
+// ---------------- status badge
+async function loadStatus() {
+    try {
+        const r = await fetch("/api/sms/status");
+        const s = await r.json();
+        const badge = $("status-badge");
+        if (s.configured) {
+            badge.className = "badge bg-success";
+            badge.textContent = `Sender: ${s.sender_id} · ${s.sent_last_24h}/${s.daily_cap} sent in 24h`;
+            $("not-configured").classList.add("d-none");
+        } else {
+            badge.className = "badge bg-danger";
+            badge.textContent = "Not configured";
+            $("not-configured").classList.remove("d-none");
+        }
+    } catch (e) {
+        $("status-badge").textContent = "Status unavailable";
+    }
+}
+
+
+// ---------------- members
+async function loadMembers() {
+    const r = await fetch("/api/members");
+    const members = await r.json();
+    const box = $("member-list");
+    box.innerHTML = "";
+    (Array.isArray(members) ? members : [])
+        .filter(m => m.is_active !== 0)
+        .forEach(m => {
+            box.insertAdjacentHTML("beforeend", `
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="${esc(m.id)}" id="m-${esc(m.id)}">
+                    <label class="form-check-label" for="m-${esc(m.id)}">${esc(m.name)}
+                        <span class="text-muted small">${esc(m.phone || "no phone")}</span></label>
+                </div>`);
+        });
+    box.querySelectorAll("input").forEach(i => i.addEventListener("change", invalidatePreview));
+}
+
+
+// ---------------- log
+async function loadLog() {
+    const body = $("log-body");
+    try {
+        const r = await fetch("/api/sms/log");
+        const data = await r.json();
+        const rows = data.log || [];
+        if (!rows.length) {
+            body.innerHTML = `<tr><td colspan="4" class="text-center text-muted">No messages yet.</td></tr>`;
+            return;
+        }
+        body.innerHTML = rows.map(x => {
+            const when = x.created_at ? new Date(x.created_at).toLocaleString() : "";
+            const ok = x.status === "sent";
+            return `<tr title="${esc(x.error || x.message || "")}">
+                <td class="small">${esc(when)}</td>
+                <td>${esc(x.member_name || x.phone || "")}</td>
+                <td class="small">${esc(x.kind)}</td>
+                <td><span class="badge ${ok ? "bg-success" : "bg-danger"}">${esc(x.status)}</span></td>
+            </tr>`;
+        }).join("");
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="4" class="text-center text-danger">Could not load.</td></tr>`;
+    }
+}
+
+
+// ---------------- preview / send
+async function callBulk(extra) {
+    const r = await fetch("/api/sms/bulk", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(requestBody(extra))
+    });
+    const data = await r.json();
+    return {ok: r.ok, data};
+}
+
+$("btn-preview").addEventListener("click", async () => {
+    $("result-box").classList.add("d-none");
+    const box = $("preview-box");
+    const {ok, data} = await callBulk({preview: true});
+
+    if (!ok && !data.preview) {
+        box.className = "alert alert-danger mt-3";
+        box.textContent = data.error || "Could not preview.";
+        invalidatePreview();
+        return;
+    }
+
+    let html = `<strong>${esc(data.recipients)}</strong> member(s) will get this message
+                (${esc(data.sms_parts_each)} SMS each).<br>
+                <div class="border rounded bg-white p-2 my-2 small">${esc(data.sample || "(no valid recipients)")}</div>`;
+    if (data.invalid_phone && data.invalid_phone.length) {
+        html += `<div class="text-danger small">No valid phone number, will be skipped: ${esc(data.invalid_phone.join(", "))}</div>`;
+    }
+    if (data.too_long && data.too_long.length) {
+        html += `<div class="text-danger small">Message too long once names are added: ${esc(data.too_long.join(", "))}</div>`;
+    }
+    html += `<div class="small text-muted">Sent in last 24h: ${esc(data.sent_last_24h)} of ${esc(data.daily_cap)} allowed.</div>`;
+
+    box.className = "alert alert-info mt-3";
+    box.innerHTML = html;
+
+    const blocked = data.would_exceed_cap || !data.configured || data.recipients === 0;
+    if (data.would_exceed_cap) {
+        box.className = "alert alert-warning mt-3";
+        box.innerHTML += `<div class="fw-bold mt-1">This would pass the daily limit, so sending is blocked.</div>`;
+    }
+    previewedKey = currentKey();
+    $("btn-send").disabled = blocked;
+});
+
+$("btn-send").addEventListener("click", async () => {
+    if (previewedKey !== currentKey()) {
+        alert("You changed something. Please press Preview again first.");
+        invalidatePreview();
+        return;
+    }
+    if (!confirm("Send this message now? This cannot be undone and each SMS costs money.")) return;
+
+    $("btn-send").disabled = true;
+    const {ok, data} = await callBulk({preview: false, confirm: true});
+    const box = $("result-box");
+    $("preview-box").classList.add("d-none");
+
+    if (ok) {
+        box.className = data.failed ? "alert alert-warning mt-3" : "alert alert-success mt-3";
+        box.textContent = `Sent: ${data.sent}. Failed: ${data.failed}.` +
+            (data.failed ? " Reasons: " + Object.entries(data.errors).map(([k, v]) => `${k} (${v})`).join(", ") : "");
+    } else {
+        box.className = "alert alert-danger mt-3";
+        box.textContent = data.error || "Sending failed.";
+    }
+    invalidatePreview();
+    loadLog();
+    loadStatus();
+});
+
+
+// ---------------- wiring
+$("message").addEventListener("input", () => {
+    const n = $("message").value.length;
+    $("counter").textContent = `${n} characters · ${segmentsFor(n)} SMS each`;
+    invalidatePreview();
+});
+
+document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener("change", () => {
+    $("pick-box").classList.toggle("d-none", !$("mode-pick").checked);
+    invalidatePreview();
+}));
+
+$("pick-everyone").addEventListener("change", e => {
+    document.querySelectorAll("#member-list input").forEach(i => { i.checked = e.target.checked; });
+    invalidatePreview();
+});
+
+$("btn-refresh").addEventListener("click", () => { loadLog(); loadStatus(); });
+
+loadStatus();
+loadMembers();
+loadLog();
+
+</script>
+
+{% endblock %}
