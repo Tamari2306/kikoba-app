@@ -15,6 +15,29 @@
         You can still write and preview a message, but sending is blocked.
     </div>
 
+    <div id="premium-box" class="alert d-none"></div>
+
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <div class="row g-2 align-items-end">
+                <div class="col-lg-5">
+                    <h6 class="fw-bold mb-1">Test the reminder text</h6>
+                    <div class="small text-muted">
+                        Sends one sample reminder, exactly as members receive it, to your own phone
+                        (or a number you type). Up to 3 a day.
+                    </div>
+                </div>
+                <div class="col-lg-3">
+                    <input type="text" id="test-phone" class="form-control" placeholder="Phone (optional)">
+                </div>
+                <div class="col-lg-2">
+                    <button id="btn-test" class="btn btn-outline-success w-100">Send me a test</button>
+                </div>
+            </div>
+            <div id="test-result" class="small mt-2"></div>
+        </div>
+    </div>
+
     <div class="row g-3">
 
         <!-- Compose -->
@@ -148,6 +171,21 @@ async function loadStatus() {
             badge.className = "badge bg-danger";
             badge.textContent = "Not configured";
             $("not-configured").classList.remove("d-none");
+        }
+
+        const p = s.reminders_premium || {};
+        const box = $("premium-box");
+        box.classList.remove("d-none", "alert-success", "alert-warning");
+        if (p.active) {
+            box.classList.add("alert-success");
+            box.innerHTML = `<strong>Automatic rejesho reminders are ON</strong> until ${esc(p.until)}.
+                Members are texted before and after each due date, only when an installment is unpaid.`;
+        } else {
+            box.classList.add("alert-warning");
+            box.innerHTML = `<strong>Automatic rejesho reminders are a premium feature.</strong>
+                Your group does not have it yet, so members are not being reminded.
+                ${p.contact ? "To switch it on, contact <strong>" + esc(p.contact) + "</strong>." : "Contact support to switch it on."}
+                The message box below still works.`;
         }
     } catch (e) {
         $("status-badge").textContent = "Status unavailable";
@@ -290,6 +328,34 @@ document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener(
 $("pick-everyone").addEventListener("change", e => {
     document.querySelectorAll("#member-list input").forEach(i => { i.checked = e.target.checked; });
     invalidatePreview();
+});
+
+$("btn-test").addEventListener("click", async () => {
+    const out = $("test-result");
+    out.className = "small mt-2 text-muted";
+    out.textContent = "Sending...";
+    $("btn-test").disabled = true;
+    try {
+        const r = await fetch("/api/sms/test", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({phone: $("test-phone").value})
+        });
+        const j = await r.json();
+        if (j.ok) {
+            out.className = "small mt-2 text-success";
+            out.innerHTML = `Sent to the phone ending ${esc(j.phone_hint)}. The text says:<br><em>${esc(j.message)}</em>`;
+        } else {
+            out.className = "small mt-2 text-danger";
+            out.textContent = j.error || "The test message could not be sent.";
+        }
+    } catch (e) {
+        out.className = "small mt-2 text-danger";
+        out.textContent = "Could not reach the server.";
+    }
+    $("btn-test").disabled = false;
+    loadLog();
+    loadStatus();
 });
 
 $("btn-refresh").addEventListener("click", () => { loadLog(); loadStatus(); });

@@ -6,9 +6,12 @@
 
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
         <h2 class="text-success mb-0">🔍 Group Money Check</h2>
-        <button class="btn btn-outline-secondary d-print-none" onclick="window.print()">
-            <i class="bi bi-printer"></i> Print
-        </button>
+        <div class="d-flex gap-2">
+            <a href="/expenses-page" class="btn btn-outline-secondary">Expenses</a>
+            <a href="/balance-check/download" class="btn btn-success">
+                <i class="bi bi-download"></i> Download PDF
+            </a>
+        </div>
     </div>
 
     <div class="card shadow-sm mb-4">
@@ -47,7 +50,7 @@
     </div>
 
     {% if can_record %}
-    <div class="card shadow-sm mb-4 d-print-none">
+    <div class="card shadow-sm mb-4">
         <div class="card-body">
             <h6 class="fw-bold">Record the M-Koba balance</h6>
             <form id="check-form" class="row g-2 align-items-end">
@@ -187,7 +190,8 @@ async function load() {
         row("Rejesho (loan repayments)", tzs(i.rejesho)) + row("Total in", tzs(i.total), true);
     document.getElementById("tbl-out").innerHTML =
         row(`Loans paid out (${o.loans_count})`, tzs(o.loans_paid_out)) +
-        row("Expenses", tzs(o.expenses)) + row("Total out", tzs(o.total), true);
+        (o.expense_breakdown || []).map(b => row("Expense: " + b.label, tzs(b.amount))).join("") +
+        row("Total out", tzs(o.total), true);
     document.getElementById("expected").textContent = tzs(now.expected_balance);
 
     // ---- history

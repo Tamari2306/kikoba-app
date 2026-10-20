@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div class="container-fluid py-4">
+
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+        <h2 class="text-success mb-0">🧾 Group Expenses</h2>
+        <a href="/balance-check" class="btn btn-outline-secondary">Back to Money Check</a>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+        <div class="card-body small">
+            <strong>What is this page?</strong>
+            Every shilling that left the group account, other than loans, is written here: leadership pay,
+            meetings, transport, charges and so on. Nothing can be deleted. A mistake can only be cancelled,
+            and the reason stays on the list for everyone to see.
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">
+            <div class="card shadow-sm h-100 border-danger"><div class="card-body">
+                <h6 class="text-muted">Total spent</h6>
+                <h3 id="total" class="fw-bold text-danger">...</h3>
+                <div class="small text-muted">Cancelled expenses are not counted.</div>
+            </div></div>
+        </div>
+        <div class="col-md-4">
+            <div class="card shadow-sm h-100"><div class="card-body">
+                <h6 class="text-muted">Leadership pay</h6>
+                <h4 id="leadership" class="fw-bold">...</h4>
+                <div id="leadership-note" class="small text-muted"></div>
+            </div></div>
+        </div>
+        <div class="col-md-4">
+            <div class="card shadow-sm h-100"><div class="card-body">
+                <h6 class="text-muted">By category</h6>
+                <table class="table table-sm mb-0"><tbody id="by-category"></tbody></table>
+            </div></div>
+        </div>
+    </div>
+
+    {% if can_record %}
+    <div class="card shadow-sm mb-4">
+        <div class="card-body">
+            <h6 class="fw-bold mb-3">Record an expense</h6>
+            <form id="expense-form" class="row g-2">
+                <div class="col-md-3">
+                    <label class="form-label small">What was it for?</label>
+                    <select id="e-category" class="form-select" required></select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Amount (TZS)</label>
+                    <input type="number" id="e-amount" class="form-control" min="1" step="1" required>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Paid to</label>
+                    <input type="text" id="e-paid-to" class="form-control" maxlength="80" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Date</label>
+                    <input type="date" id="e-date" class="form-control">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Receipt no. (optional)</label>
+                    <input type="text" id="e-receipt" class="form-control" maxlength="60">
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small">Description</label>
+                    <input type="text" id="e-description" class="form-control" maxlength="300" required>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label small">
+                        Approved by / which meeting
+                        <span id="approval-hint" class="text-muted"></span>
+                    </label>
+                    <input type="text" id="e-approval" class="form-control" maxlength="200">
+                </div>
+                <div class="col-12">
+                    <button type="submit" class="btn btn-success">Save expense</button>
+                    <span id="e-error" class="text-danger small ms-2"></span>
+                </div>
+            </form>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="card shadow-sm">
+        <div class="card-body">
+            <h6 class="fw-bold mb-3">All expenses</h6>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Date</th><th>For</th><th class="text-end">Amount</th><th>Paid to</th>
+                            <th>Description</th><th>Approved by</th><th>Recorded by</th><th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="ledger"><tr><td colspan="8" class="text-muted">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+
+const CAN_RECORD = {{ 'true' if can_record else 'false' }};
+const CAN_VOID   = {{ 'true' if can_void else 'false' }};
+
+const tzs = v => Number(v || 0).toLocaleString() + " TZS";
+
+function esc(s) {
+    return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+let approvalAbove = 50000;
+
+
+async function load() {
+    const res = await fetch("/api/expenses");
+    const d = await res.json();
+    if (!res.ok) {
+        document.getElementById("ledger").innerHTML =
+            `<tr><td colspan="8" class="text-danger">${esc(d.error || "Could not load.")}</td></tr>`;
+        return;
+    }
+    approvalAbove = d.approval_above;
+
+    document.getElementById("total").textContent = tzs(d.total);
+    document.getElementById("leadership").textContent = tzs(d.leadership.paid) + " paid";
+    document.getElementById("leadership-note").textContent =
+        `The group agreed ${tzs(d.leadership.agreed)}. Still allowed: ${tzs(d.leadership.remaining)}.`;
+    document.getElementById("by-category").innerHTML = d.by_category.length
+        ? d.by_category.map(c => `<tr><td>${esc(c.label)}</td><td class="text-end">${tzs(c.amount)}</td></tr>`).join("")
+        : `<tr><td class="text-muted">Nothing spent yet.</td></tr>`;
+
+    if (CAN_RECORD) {
+        const sel = document.getElementById("e-category");
+        if (!sel.options.length) {
+            sel.innerHTML = `<option value="">Choose...</option>` +
+                d.categories.map(c => `<option value="${esc(c.key)}">${esc(c.label)}</option>`).join("");
+        }
+        document.getElementById("approval-hint").textContent =
+            `(needed for leadership pay and above ${tzs(d.approval_above)})`;
+    }
+
+    document.getElementById("ledger").innerHTML = d.expenses.length ? d.expenses.map(x => {
+        const voided = x.voided;
+        const strike = voided ? "text-decoration-line-through text-muted" : "";
+        const recorded = x.source === "jamii" ? "Jamii deduction (leader)" :
+            `${esc(x.recorded_by || "")} <span class="text-muted small">${esc(x.recorded_role || "")}</span>`;
+        const action = voided
+            ? `<span class="badge bg-secondary" title="${esc(x.void_reason || "")}">Cancelled</span>
+               <div class="small text-muted">${esc(x.void_reason || "")} (${esc(x.voided_by || "")})</div>`
+            : (CAN_VOID && x.source === "expense"
+                ? `<button class="btn btn-sm btn-outline-danger" onclick="voidExpense(${x.id})">Cancel</button>` : "");
+        return `<tr>
+            <td class="text-nowrap ${strike}">${esc(x.date)}</td>
+            <td class="${strike}">${esc(x.category_label)}</td>
+            <td class="text-end fw-bold ${strike}">${tzs(x.amount)}</td>
+            <td class="${strike}">${esc(x.paid_to)}</td>
+            <td class="${strike}">${esc(x.description)}${x.receipt_ref ? ` <span class="text-muted small">(receipt ${esc(x.receipt_ref)})</span>` : ""}</td>
+            <td class="small ${strike}">${esc(x.approval || "")}</td>
+            <td class="small">${recorded}</td>
+            <td>${action}</td>
+        </tr>`;
+    }).join("") : `<tr><td colspan="8" class="text-muted">No expenses recorded yet.</td></tr>`;
+}
+
+
+async function voidExpense(id) {
+    const reason = prompt("Why is this expense being cancelled? Everyone will see the reason.");
+    if (!reason) return;
+    const res = await fetch(`/api/expenses/${id}/void`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({reason})
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || "Could not cancel."); return; }
+    load();
+}
+
+
+if (CAN_RECORD) {
+    document.getElementById("e-date").value = new Date().toISOString().slice(0, 10);
+    document.getElementById("expense-form").addEventListener("submit", async e => {
+        e.preventDefault();
+        const err = document.getElementById("e-error");
+        err.textContent = "";
+        const amount = Number(document.getElementById("e-amount").value);
+        if (!confirm(`Save this expense of ${tzs(amount)}? It cannot be deleted later, only cancelled with a reason.`)) return;
+        const res = await fetch("/api/expenses", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                category: document.getElementById("e-category").value,
+                amount: document.getElementById("e-amount").value,
+                paid_to: document.getElementById("e-paid-to").value,
+                spent_on: document.getElementById("e-date").value,
+                receipt_ref: document.getElementById("e-receipt").value,
+                description: document.getElementById("e-description").value,
+                approval: document.getElementById("e-approval").value
+            })
+        });
+        const data = await res.json();
+        if (!res.ok) { err.textContent = data.error || "Could not save."; return; }
+        e.target.reset();
+        document.getElementById("e-date").value = new Date().toISOString().slice(0, 10);
+        load();
+    });
+}
+
+load();
+
+</script>
+
+{% endblock %}

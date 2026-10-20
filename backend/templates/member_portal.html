@@ -61,6 +61,22 @@
     ends and the distribution method is finalised by the admin.
 </div>
 
+<!-- Group Money Check -->
+<div class="card border-0 shadow-sm mb-4" id="mcMemberCard">
+    <div class="card-header bg-dark text-white fw-bold">
+        <i class="fas fa-search-dollar me-2"></i>Group Money Check
+    </div>
+    <div class="card-body">
+        <div id="mcmStatus" class="small mb-3 text-muted">Loading...</div>
+        <div id="mcmFacts" class="small text-muted mb-3"></div>
+        <a href="/balance-check" class="btn btn-sm btn-success me-1 mb-1">Open the full check</a>
+        <a href="/balance-check/download" class="btn btn-sm btn-outline-secondary me-1 mb-1">
+            <i class="fas fa-download me-1"></i>Download PDF
+        </a>
+        <a href="/expenses-page" class="btn btn-sm btn-outline-secondary mb-1">Group expenses</a>
+    </div>
+</div>
+
 <!-- My Contributions -->
 <div class="card border-0 shadow-sm mb-4">
     <div class="card-header bg-success text-white fw-bold">
@@ -185,5 +201,42 @@ async function loadMyData() {
 }
 
 document.addEventListener('DOMContentLoaded', loadMyData);
+</script>
+
+<script>
+async function loadMemberMoneyCheck() {
+    const status = document.getElementById('mcmStatus');
+    try {
+        const res = await fetch('/api/reconciliation');
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'failed');
+        const latest = d.latest;
+        const money = v => fc(v);   // fc() is already defined by this page
+ 
+        if (!latest) {
+            status.className = 'alert alert-warning small mb-3';
+            status.innerHTML = '<strong>No M-Koba balance has been recorded yet.</strong> Leaders should record one so everyone can see that the books match the account.';
+        } else if (latest.status === 'matched') {
+            status.className = 'alert alert-success small mb-3';
+            status.innerHTML = `<strong>Matched.</strong> On ${latest.as_of} the M-Koba balance (${money(latest.actual)}) agreed with the records.`;
+        } else if (latest.status === 'short') {
+            status.className = 'alert alert-danger small mb-3';
+            status.innerHTML = `<strong>${money(Math.abs(latest.difference))} is missing.</strong> On ${latest.as_of} M-Koba held ${money(latest.actual)} but the records say ${money(latest.expected)}.`;
+        } else {
+            status.className = 'alert alert-warning small mb-3';
+            status.innerHTML = `<strong>${money(latest.difference)} extra.</strong> On ${latest.as_of} M-Koba held ${money(latest.actual)} but the records only explain ${money(latest.expected)}.`;
+        }
+ 
+        const problems = d.integrity.filter(c => c.level === 'bad').length;
+        const warnings = d.integrity.filter(c => c.level === 'warn').length;
+        document.getElementById('mcmFacts').innerHTML =
+            `Last checked: ${latest ? latest.as_of + ' by ' + (latest.entered_by || 'a leader') : 'never'}. ` +
+            `Book checks: ${problems ? problems + ' problem(s)' : 'no problems'}${warnings ? ', ' + warnings + ' to review' : ''}. ` +
+            `Leader actions in the last 30 days: ${d.fairness.actions_30d.total}.`;
+    } catch (e) {
+        status.textContent = 'Could not load the money check.';
+    }
+}
+document.addEventListener('DOMContentLoaded', loadMemberMoneyCheck);
 </script>
 {% endblock %}
