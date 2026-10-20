@@ -93,7 +93,7 @@
                             <tr>
                                 <th>ID</th><th>Name</th><th>Members</th>
                                 <th>Contributions</th><th>Status</th>
-                                <th>Expires</th><th>Profits</th><th>Actions</th>
+                                <th>Expires</th><th>Profits</th><th>SMS reminders</th><th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="groupsBody"></tbody>
@@ -170,11 +170,69 @@
     </div>
 </div>
 
+<!-- SMS add-on Modal -->
+<div class="modal fade" id="addonModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content bg-dark border border-secondary">
+            <div class="modal-header border-secondary">
+                <h5 class="modal-title text-white" id="addonTitle">SMS reminders</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="addonGroupId">
+                <div class="small text-muted mb-3" id="addonCurrent"></div>
+                <div class="mb-3">
+                    <label class="form-label text-white">Add how many days?</label>
+                    <select id="addonDaysPreset" class="form-select bg-dark text-white border-secondary"
+                            onchange="document.getElementById('addonDays').value = this.value">
+                        <option value="30">30 days (1 month)</option>
+                        <option value="90">90 days (3 months)</option>
+                        <option value="180">180 days (6 months)</option>
+                        <option value="365">365 days (1 year)</option>
+                    </select>
+                    <input type="number" id="addonDays" min="1" max="400" value="30"
+                           class="form-control bg-dark text-white border-secondary mt-2">
+                    <div class="form-text">Extending adds these days on top of the time the group still has left.</div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label text-white">Amount paid (TZS)</label>
+                    <input type="number" id="addonAmount" min="0" value="0"
+                           class="form-control bg-dark text-white border-secondary">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label text-white">Payment reference</label>
+                    <input type="text" id="addonRef" maxlength="80"
+                           class="form-control bg-dark text-white border-secondary"
+                           placeholder="e.g. M-Pesa ref">
+                </div>
+                <div class="mb-1">
+                    <label class="form-label text-white">Note (optional)</label>
+                    <input type="text" id="addonNote" maxlength="200"
+                           class="form-control bg-dark text-white border-secondary">
+                </div>
+            </div>
+            <div class="modal-footer border-secondary">
+                <button class="btn btn-success fw-bold" onclick="submitAddon()">
+                    <i class="fas fa-check me-1"></i> Activate / extend
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 function fc(n){const v=parseFloat(n);return isNaN(v)?'0':v.toLocaleString('en-TZ',{maximumFractionDigits:0})+' TZS';}
 
+// Escape text before it goes into the page (group and member names are typed by users)
+function esc(s){
+    return String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 let allGroups = [];
+let addons = {};   // group_id -> {active, active_until}
 
 const statusBadge = s => ({
     free:      '<span class="badge badge-free">Free</span>',
@@ -192,17 +250,44 @@ async function loadStats() {
     document.getElementById('totalRevenue').textContent    = fc(data.totals.total_subscription_revenue);
     document.getElementById('totalOutstanding').textContent= fc(data.totals.total_outstanding_bills);
 
+    // SMS add-on status per group (the table still works if this call is not available)
+    addons = {};
+    try {
+        const ar = await fetch('/api/owner/addons');
+        if (ar.ok) {
+            const ad = await ar.json();
+            (ad.groups || []).forEach(a => { addons[a.group_id] = a; });
+        }
+    } catch (e) { /* ignore */ }
+
     allGroups = data.groups;
     renderGroups(allGroups);
     renderRecentBills(data.recent_bills);
 }
 
+function addonCell(g) {
+    const a = addons[g.id];
+    if (!a) return '<span class="text-muted">—</span>';
+    const badge = a.active
+        ? `<span class="badge bg-success" title="Active until ${esc(a.active_until)}">On until ${esc(a.active_until)}</span>`
+        : '<span class="badge bg-secondary">Off</span>';
+    return `<div class="d-flex flex-column gap-1 align-items-start">
+        ${badge}
+        <div class="d-flex gap-1">
+            <button class="btn btn-sm btn-outline-info" onclick="openAddon(${g.id})">
+                ${a.active ? 'Extend' : 'Activate'}
+            </button>
+            ${a.active ? `<button class="btn btn-sm btn-outline-danger" onclick="stopAddon(${g.id})">Stop</button>` : ''}
+        </div>
+    </div>`;
+}
+
 function renderGroups(groups) {
     const tbody = document.getElementById('groupsBody');
     tbody.innerHTML = groups.map(g => `
-        <tr class="group-row" onclick="loadGroupDetail(${g.id}, '${g.name}')">
+        <tr class="group-row" onclick="loadGroupDetail(${g.id})">
             <td>${g.id}</td>
-            <td class="fw-bold text-white">${g.name}</td>
+            <td class="fw-bold text-white">${esc(g.name)}</td>
             <td>${g.member_count}</td>
             <td>${fc(g.total_contributions)}</td>
             <td>${statusBadge(g.subscription_status)}</td>
@@ -212,6 +297,7 @@ function renderGroups(groups) {
                     ${g.profits_unlocked ? '🔓 Unlocked' : '🔒 Locked'}
                 </span>
             </td>
+            <td onclick="event.stopPropagation()">${addonCell(g)}</td>
             <td onclick="event.stopPropagation()">
                 <div class="d-flex gap-1 flex-wrap">
                     <button class="btn btn-sm btn-outline-success"
@@ -244,22 +330,22 @@ function renderRecentBills(bills) {
         <div class="p-3 border-bottom border-secondary">
             <div class="d-flex justify-content-between align-items-start">
                 <div>
-                    <div class="fw-bold text-white small">${b.group_name}</div>
+                    <div class="fw-bold text-white small">${esc(b.group_name)}</div>
                     <div class="text-muted" style="font-size:0.75rem">
-                        ${b.period_start} → ${b.period_end}
+                        ${esc(b.period_start)} → ${esc(b.period_end)}
                     </div>
                     <div class="text-muted" style="font-size:0.75rem">
                         Due: ${fc(b.amount_due)} | Paid: ${fc(b.amount_paid)}
                     </div>
-                    ${b.payment_reference ? `<div class="text-success" style="font-size:0.75rem">Ref: ${b.payment_reference}</div>` : ''}
+                    ${b.payment_reference ? `<div class="text-success" style="font-size:0.75rem">Ref: ${esc(b.payment_reference)}</div>` : ''}
                 </div>
                 <div class="d-flex flex-column gap-1 align-items-end">
                     <span class="badge ${b.status==='paid'?'bg-success':b.status==='free'?'bg-info':b.status==='unpaid'?'bg-danger':'bg-secondary'}">
-                        ${b.status}
+                        ${esc(b.status)}
                     </span>
                     ${b.status === 'unpaid' ? `
                     <button class="btn btn-sm btn-outline-success" style="font-size:0.7rem"
-                            onclick="openMarkPaid(${b.group_id}, '${b.period_start}', ${b.amount_due})">
+                            onclick="openMarkPaid(${b.group_id}, '${esc(b.period_start)}', ${b.amount_due})">
                         Mark Paid
                     </button>` : ''}
                 </div>
@@ -268,7 +354,9 @@ function renderRecentBills(bills) {
     `).join('') : '<div class="p-3 text-muted text-center">No bills yet</div>';
 }
 
-async function loadGroupDetail(groupId, name) {
+async function loadGroupDetail(groupId) {
+    const known = allGroups.find(g => g.id === groupId);
+    const name = known ? known.name : '';
     document.getElementById('groupDetail').style.display = 'block';
     document.getElementById('detailTitle').textContent = `${name} (ID: ${groupId})`;
     document.getElementById('detailMembers').innerHTML = '<div class="text-muted">Loading...</div>';
@@ -284,9 +372,9 @@ async function loadGroupDetail(groupId, name) {
                 <thead><tr><th>Name</th><th>Phone</th><th>Role</th><th>Active</th><th>Password</th></tr></thead>
                 <tbody>
                     ${data.members.map(m => `<tr>
-                        <td>${m.name}</td>
-                        <td>${m.phone||'—'}</td>
-                        <td><span class="badge bg-${roleColor[m.role]||'secondary'}">${m.role}</span></td>
+                        <td>${esc(m.name)}</td>
+                        <td>${esc(m.phone||'—')}</td>
+                        <td><span class="badge bg-${roleColor[m.role]||'secondary'}">${esc(m.role)}</span></td>
                         <td>${m.is_active ? '✅' : '❌'}</td>
                         <td>${m.has_password ? '✅' : '❌'}</td>
                     </tr>`).join('')}
@@ -297,14 +385,14 @@ async function loadGroupDetail(groupId, name) {
     document.getElementById('detailBills').innerHTML = data.bills.map(b => `
         <div class="p-2 border-bottom border-secondary d-flex justify-content-between align-items-center">
             <div>
-                <div class="small text-white">${b.period_start} → ${b.period_end}</div>
+                <div class="small text-white">${esc(b.period_start)} → ${esc(b.period_end)}</div>
                 <div class="small text-muted">${b.member_count} members × 1,000 = ${fc(b.amount_due)}</div>
-                ${b.payment_reference ? `<div class="small text-success">Ref: ${b.payment_reference}</div>` : ''}
+                ${b.payment_reference ? `<div class="small text-success">Ref: ${esc(b.payment_reference)}</div>` : ''}
             </div>
             <div class="d-flex flex-column gap-1 align-items-end">
-                <span class="badge ${b.status==='paid'?'bg-success':b.status==='free'?'bg-info':'bg-danger'}">${b.status}</span>
+                <span class="badge ${b.status==='paid'?'bg-success':b.status==='free'?'bg-info':'bg-danger'}">${esc(b.status)}</span>
                 ${b.status==='unpaid'?`<button class="btn btn-sm btn-success" style="font-size:0.7rem"
-                    onclick="openMarkPaid(${b.group_id},'${b.period_start}',${b.amount_due})">Mark Paid</button>`:''}
+                    onclick="openMarkPaid(${b.group_id},'${esc(b.period_start)}',${b.amount_due})">Mark Paid</button>`:''}
             </div>
         </div>
     `).join('') || '<div class="text-muted p-2">No billing history</div>';
@@ -371,6 +459,55 @@ async function submitMarkPaid() {
     }
 }
 
+/* ================= SMS reminders add-on ================= */
+function openAddon(groupId) {
+    const g = allGroups.find(x => x.id === groupId) || {name: ''};
+    const a = addons[groupId] || {};
+    document.getElementById('addonGroupId').value = groupId;
+    document.getElementById('addonTitle').textContent = `SMS reminders: ${g.name}`;
+    document.getElementById('addonCurrent').textContent = a.active
+        ? `Currently ON until ${a.active_until}. New days are added after that date.`
+        : 'Currently OFF. Days start from today.';
+    document.getElementById('addonDaysPreset').value = '30';
+    document.getElementById('addonDays').value = 30;
+    document.getElementById('addonAmount').value = 0;
+    document.getElementById('addonRef').value = '';
+    document.getElementById('addonNote').value = '';
+    new bootstrap.Modal(document.getElementById('addonModal')).show();
+}
+
+async function submitAddon() {
+    const groupId = parseInt(document.getElementById('addonGroupId').value);
+    const days = parseInt(document.getElementById('addonDays').value);
+    if (!days || days < 1) { alert('Enter the number of days.'); return; }
+    const res = await fetch(`/api/owner/group/${groupId}/addon`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            days: days,
+            amount_paid: parseFloat(document.getElementById('addonAmount').value) || 0,
+            payment_reference: document.getElementById('addonRef').value,
+            note: document.getElementById('addonNote').value
+        })
+    });
+    const data = await res.json();
+    if (res.ok) {
+        bootstrap.Modal.getInstance(document.getElementById('addonModal')).hide();
+        alert(`SMS reminders are ON for ${data.group} until ${data.active_until}.`);
+        loadStats();
+    } else {
+        alert(data.error || 'Failed');
+    }
+}
+
+async function stopAddon(groupId) {
+    const g = allGroups.find(x => x.id === groupId) || {name: ''};
+    if (!confirm(`Switch SMS reminders OFF for ${g.name} starting today?`)) return;
+    const res = await fetch(`/api/owner/group/${groupId}/addon/stop`, {method: 'POST'});
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed'); return; }
+    loadStats();
+}
+
 async function generateBills() {
     if (!confirm('Generate month-end bills for all groups?')) return;
     const res  = await fetch('/api/owner/subscription/generate-bills', {method:'POST'});
@@ -379,11 +516,38 @@ async function generateBills() {
     loadStats();
 }
 
+/* Reminders: preview first, then send */
 async function sendReminders() {
-    if (!confirm('Send SMS reminders for loans due in 1-3 days?')) return;
-    const res  = await fetch('/api/reminders/loan-due', {method:'POST'});
-    const data = await res.json();
-    alert(`Sent: ${data.sent}, Errors: ${data.errors}`);
+    let res, data;
+    try {
+        res  = await fetch('/api/reminders/loan-due?dry_run=1', {method:'POST'});
+        data = await res.json();
+    } catch (e) {
+        alert('Could not reach the server.');
+        return;
+    }
+    if (!res.ok) { alert(data.error || 'Could not prepare the reminders.'); return; }
+
+    const n = (data.would_send || []).length;
+    const notes = [];
+    if (data.skipped_not_premium) notes.push(`${data.skipped_not_premium} loan(s) skipped: group has no SMS add-on`);
+    if (data.skipped_already_sent) notes.push(`${data.skipped_already_sent} already sent`);
+    if (data.skipped_paid) notes.push(`${data.skipped_paid} already paid`);
+    if (data.skipped_bad_phone) notes.push(`${data.skipped_bad_phone} with no valid phone`);
+    if (data.held_back_by_limit) notes.push(`${data.held_back_by_limit} held back by the per-run limit (run again to send them)`);
+
+    if (n === 0) {
+        alert('Nobody needs a reminder right now.' + (notes.length ? '\n\n' + notes.join('\n') : ''));
+        return;
+    }
+    const sample = data.would_send[0];
+    if (!confirm(`${n} reminder text(s) will be sent.\n\nExample to ${sample.member}:\n${sample.message}\n\n` +
+                 (notes.length ? notes.join('\n') + '\n\n' : '') + 'Send them now?')) return;
+
+    res  = await fetch('/api/reminders/loan-due', {method:'POST'});
+    data = await res.json();
+    if (!res.ok) { alert(data.error || 'Sending failed.'); return; }
+    alert(`Sent: ${data.sent}. Failed: ${data.failed}.`);
 }
 
 loadStats();
